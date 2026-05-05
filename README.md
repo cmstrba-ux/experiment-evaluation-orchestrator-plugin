@@ -4,7 +4,7 @@ Reads experiments from `test_definitions`, fans out parallel AB / SEO / deal-cha
 
 ## Slash command
 
-- `/evaluate-experiments [<alternate_name> | --auto | --since YYYY-MM-DD | --rerender <run-id>]`
+- `/evaluate-reviews-experiments [<alternate_name> | --auto | --since YYYY-MM-DD | --rerender <run-id>]`
 
 ## Tool contract
 

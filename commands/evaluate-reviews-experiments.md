@@ -4,7 +4,7 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Task
 argument-hint: <alternate_name> | --auto | --since YYYY-MM-DD | --rerender <run-id>
 ---
 
-You are running the experiment-evaluation-orchestrator. The user typed: `/evaluate-experiments $ARGUMENTS`
+You are running the experiment-evaluation-orchestrator. The user typed: `/evaluate-reviews-experiments $ARGUMENTS`
 
 ## Step 1: Parse arguments
 

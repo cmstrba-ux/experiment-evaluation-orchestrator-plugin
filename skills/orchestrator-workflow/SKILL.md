@@ -1,6 +1,6 @@
 ---
 name: orchestrator-workflow
-description: Top-level workflow for evaluating a queue of experiments. Reads test_definitions, dispatches AB / SEO / deal-charts subagents in parallel (Sonnet, capped ~6 in flight), assembles the combined HTML report. Invoked by the /evaluate-experiments slash command.
+description: Top-level workflow for evaluating a queue of experiments. Reads test_definitions, dispatches AB / SEO / deal-charts subagents in parallel (Sonnet, capped ~6 in flight), assembles the combined HTML report. Invoked by the /evaluate-reviews-experiments slash command.
 ---
 
 # orchestrator-workflow
