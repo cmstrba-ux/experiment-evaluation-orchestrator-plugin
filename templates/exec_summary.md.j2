@@ -1,18 +1,24 @@
+{# Note: render.py now writes summary.md directly (see render_summary in render.py).
+   This template is kept for backward compatibility / external renderers. #}
 # Experiment Evaluation — {{ run_id }}
 
 Data through **{{ data_through }}**.
 
 ## Scoreboard
 
-| Experiment | Label | AB-Filtered | AB-Overall | SEO DiD | Verdict | SRM |
+| Experiment | Label | AB-Filtered | AB-Overall | SEO DiD (clicks pp) | Verdict | SRM |
 |---|---|---|---|---|---|---|
 {%- for name, exp in experiments.items() %}
-| {{ name }} | {{ exp.ab.label }} | {{ "%.2f"|format(exp.ab.raw.filtered.stats.mean_delta) }} (p={{ "%.3f"|format(exp.ab.raw.filtered.stats.p_value) }}) | {{ "%.2f"|format(exp.ab.raw.overall.stats.mean_delta) }} (p={{ "%.3f"|format(exp.ab.raw.overall.stats.p_value) }}) | {% if exp.seo and exp.seo.status == 'ok' %}{{ "%.1f"|format(exp.seo.did.clicks) }}pp{% else %}n/a{% endif %} | {{ exp.ab.raw.filtered.verdict }} | {{ exp.ab.srm.filtered.verdict }} |
+{%- set f = (exp.ab.raw.filtered.stats.treatment if exp.ab.raw.filtered.stats.treatment is defined else exp.ab.raw.filtered.stats) %}
+{%- set o = (exp.ab.raw.overall.stats.treatment  if exp.ab.raw.overall.stats.treatment  is defined else exp.ab.raw.overall.stats) %}
+{%- set seo_did = (exp.seo.did_overall.did.clk_pp if exp.seo and exp.seo.did_overall and exp.seo.did_overall.did else None) %}
+| {{ name }} | {{ exp.ab.label }} | {{ "%.4f"|format(f.mean_delta) }} (p={{ "%.3f"|format(f.p_value) }}) | {{ "%.4f"|format(o.mean_delta) }} (p={{ "%.3f"|format(o.p_value) }}) | {% if seo_did is not none %}{{ "%+.2f"|format(seo_did) }}pp{% else %}n/a{% endif %} | {{ exp.ab.raw.filtered.verdict }} | {{ exp.ab.srm.filtered.verdict }} |
 {%- endfor %}
 
 ## Methodology
-- AB significance: paired t-test on daily metric, α=0.05.
+- AB significance: paired t-test on daily M1/UV, α=0.05.
 - SRM check: chi-square, α=0.001 (industry standard).
 - SRM remediation: re-run with `active_visitor_flag='Y'` when raw SRM fails.
+- SEO DiD: variant pre/post % change minus control pre/post % change, day-normalized.
 
 Full HTML report: `combined_report.html`.

@@ -27,7 +27,9 @@ description: Coordinator that produces both AB-Filtered (deal-scoped) and AB-Ove
 3. **SRM check on each view.** Use `stats.srm_chi_square` against expected split (default 50/50; for A/B/C derive from observed variant count). Verdict from `chi_sq.verdict`.
 4. **If SRM fail on Filtered:** run `bq_queries.ab_filtered_remediated`, recompute stats. Add to JSON under `remediated.filtered`.
 5. **If SRM fail on Overall:** run `bq_queries.ab_overall_remediated`, recompute stats. Add under `remediated.overall`.
-6. **PerCategory** (only if `use_deal_category_split=TRUE`): split filtered rows by `experimentname` suffix (FD/Automotive/HBW/TTD/Health & Fitness/Home Services/Personal Services/Retail) — re-run stats per category in Python.
+6. **PerCategory — Filtered** (only if `use_deal_category_split=TRUE`): run `bq_queries.category_daily` to get daily per-category × variant deal-scoped stats. Compute paired t-test on M1/UV and CVR per cat. Emit under `per_category.<cat>.{daily,m1uv,cvr,variants,srm,verdict}`.
+   - **Daily rows in `per_category.<cat>.daily` MUST include the underlying totals** (`uv_ctrl, uv_treat, m1_ctrl, m1_treat, udv_ctrl, udv_treat, orders_ctrl, orders_treat`) alongside any pre-divided ratios (`m1uv_ctrl/treat, cvr_ctrl/treat`). The renderer uses these to compute the **aggregate-ratio %Δ** (`SUM(num)/SUM(den)`) which is the canonical ab-experiments-plugin metric and matches Groupon dashboards. Emitting only daily ratios produces a daily-mean pct that diverges from the dashboards by ~0.1–0.2pp when daily UV varies.
+6a. **PerCategory — Overall** (only if `use_deal_category_split=TRUE`): each split is its own GrowthBook experiment (e.g. `xp-mbnxt-31196-ai-review-summary-hbw`). Discover the sub-experiment names by scanning the bcookie experiment table for matching prefixes, OR pass an explicit `sub_experiments` list. Run `bq_queries.overall_per_cat_daily` once with the STRUCT array of `{name, cat}`. Compute paired t-test on M1/UV and CVR per cat. Emit under `per_category_overall.<cat>.{daily,m1uv,cvr}` with the same daily-row-shape requirement as 6.
 7. **Verdict + Label** per spec §5 (FINAL / FINAL — can be closed / PRELIMINARY).
 8. **Persistent SRM:** if SRM still fails after remediation → mark verdict `INCONCLUSIVE — persistent SRM`.
 9. **Passthrough .docx (delegate).** Spawn a subagent to invoke `ab-experiments:evaluate-experiment` with `experiment_name` as $ARGUMENTS. Save the .docx output to `<passthrough_dir>/<alternate_name>.docx`. If it fails, record `passthrough_docx_error` but don't block the main eval.
@@ -49,8 +51,12 @@ description: Coordinator that produces both AB-Filtered (deal-scoped) and AB-Ove
     "filtered": {...},
     "overall":  {...}
   },
-  "per_category": {  // present only when use_deal_category_split=TRUE
-    "Food & Drink": {...},
+  "per_category": {  // FILTERED, deal-scoped — present only when use_deal_category_split=TRUE
+    "Food & Drink": {"daily":[...], "m1uv":{mean_delta,mean_delta_pct,p_value,n}, "cvr":{...}, "variants":{...}, "srm":{...}, "verdict":"..."},
+    "Automotive":   {...}
+  },
+  "per_category_overall": {  // OVERALL, population-wide — present only when use_deal_category_split=TRUE
+    "Food & Drink": {"daily":[...], "m1uv":{...}, "cvr":{...}},
     "Automotive":   {...}
   },
   "passthrough_docx": "<path>"  // optional

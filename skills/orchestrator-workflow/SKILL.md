@@ -17,15 +17,16 @@ description: Top-level workflow for evaluating a queue of experiments. Reads tes
 4. **Verify dependencies installed.** Check that both `ab-experiments` and `seo-impact-plugin` are loaded by querying the plugin manifest. If missing, fail with install instructions.
 5. **list-experiments.** Build queue. If empty → exit with message.
 6. **resolve-deal-urls** for every queue entry where `test_deals` has matching rows. Cache results in `<run_dir>/raw/urls_<alt_name>.json`.
-7. **Dispatch parallel subagents** (Agent tool, model=sonnet, single message containing multiple tool calls):
+7. **resolve-control-urls** for every entry that's SEO-eligible (start_date <= today-7). Cache in `<run_dir>/raw/control_urls_<alt_name>.json`. Required so seo-impact-analyzer can compute DiD.
+8. **Dispatch parallel subagents** (Agent tool, model=sonnet, single message containing multiple tool calls):
    - For each experiment, fan out:
-     - `run-ab-evaluation` → `<run_dir>/raw/ab_<alt_name>.json`
-     - `run-seo-evaluation` (only if URLs exist AND start_date <= today-7) → `<run_dir>/raw/seo_<alt_name>.json`
-     - `run-deal-charts` (only if URLs exist) → `<run_dir>/raw/deal_<alt_name>.json`
+     - `run-ab-evaluation` → `<run_dir>/raw/ab_<alt_name>.json` (also computes per_category Filtered + Overall)
+     - `run-seo-evaluation` (only if variant URLs exist AND start_date <= today-7) → `<run_dir>/raw/seo_<alt_name>.json`. Pass `variant_urls` and `control_urls` so DiD always computed.
+     - `run-deal-charts` (only if URLs exist) → `<run_dir>/raw/deal_<alt_name>.json` (winners/losers enriched with company_name + deal_title)
    - Cap concurrency: dispatch in batches of 6 if queue × 3 > 6.
-8. **Verify outputs.** Each expected JSON exists; if a subagent failed, the JSON contains `{"status":"failed","reason":...}` rather than missing. Log failures, continue.
-9. **render-combined-report** on `<run_dir>`.
-10. **Print final paths** to user: combined_report.html, summary.md, passthrough/.
+9. **Verify outputs.** Each expected JSON exists; if a subagent failed, the JSON contains `{"status":"failed","reason":...}` rather than missing. Log failures, continue.
+10. **render-combined-report** on `<run_dir>` with `--run-id` and `--data-through`.
+11. **Print final paths** to user: combined_report.html, summary.md, passthrough/.
 
 ## Tool contract
 - All BQ via `bq` CLI. No DDL/DML. No MCP. No Okta.
