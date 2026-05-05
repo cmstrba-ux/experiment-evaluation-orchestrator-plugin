@@ -1,0 +1,49 @@
+[
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "alternate_name",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "experiment_name",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "start_date",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "end_date",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "use_deal_category_split",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "use_misc_split",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
+    "name": "evaluate_automatically",
+    "type": "STRING"
+  },
+  {
+    "mode": "REQUIRED",
+    "name": "_timestamp",
+    "type": "TIMESTAMP"
+  }
+]

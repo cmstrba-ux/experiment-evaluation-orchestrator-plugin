@@ -1,0 +1,179 @@
+[
+  {
+    "name": "event_date",
+    "type": "DATE"
+  },
+  {
+    "name": "country",
+    "type": "STRING"
+  },
+  {
+    "name": "region",
+    "type": "STRING"
+  },
+  {
+    "name": "clientPlatform",
+    "type": "STRING"
+  },
+  {
+    "name": "groupon_version",
+    "type": "STRING"
+  },
+  {
+    "name": "log_status",
+    "type": "STRING"
+  },
+  {
+    "name": "cash_payment_type",
+    "type": "STRING"
+  },
+  {
+    "name": "experimentname",
+    "type": "STRING"
+  },
+  {
+    "name": "variantname",
+    "type": "STRING"
+  },
+  {
+    "name": "web_category_level_1",
+    "type": "STRING"
+  },
+  {
+    "name": "web_category_level_2",
+    "type": "STRING"
+  },
+  {
+    "name": "web_category_level_3",
+    "type": "STRING"
+  },
+  {
+    "name": "web_category_level_4",
+    "type": "STRING"
+  },
+  {
+    "name": "web_category_level_5",
+    "type": "STRING"
+  },
+  {
+    "name": "web_category_level_6",
+    "type": "STRING"
+  },
+  {
+    "name": "pds_cat_name",
+    "type": "STRING"
+  },
+  {
+    "name": "UV",
+    "type": "INTEGER"
+  },
+  {
+    "name": "UDV",
+    "type": "INTEGER"
+  },
+  {
+    "name": "CV_views",
+    "type": "INTEGER"
+  },
+  {
+    "name": "CV_viewers",
+    "type": "INTEGER"
+  },
+  {
+    "name": "orders_placed",
+    "type": "INTEGER"
+  },
+  {
+    "name": "distinct_bcookie_count",
+    "type": "INTEGER"
+  },
+  {
+    "name": "uv_logged_in",
+    "type": "INTEGER"
+  },
+  {
+    "name": "uv_logged_out",
+    "type": "INTEGER"
+  },
+  {
+    "name": "gross_bookings",
+    "type": "NUMERIC"
+  },
+  {
+    "name": "gross_revenue",
+    "type": "NUMERIC"
+  },
+  {
+    "name": "vfm",
+    "type": "NUMERIC"
+  },
+  {
+    "name": "margin_1_vfm",
+    "type": "NUMERIC"
+  },
+  {
+    "name": "promo_spend",
+    "type": "NUMERIC"
+  },
+  {
+    "name": "od",
+    "type": "NUMERIC"
+  },
+  {
+    "name": "ue_orders_logged_in",
+    "type": "INTEGER"
+  },
+  {
+    "name": "ue_orders_logged_out",
+    "type": "INTEGER"
+  },
+  {
+    "name": "cv_logged_in",
+    "type": "INTEGER"
+  },
+  {
+    "name": "cv_logged_out",
+    "type": "INTEGER"
+  },
+  {
+    "name": "ue_orders",
+    "type": "INTEGER"
+  },
+  {
+    "name": "ue_orders_auth",
+    "type": "INTEGER"
+  },
+  {
+    "name": "ue_orders_can",
+    "type": "INTEGER"
+  },
+  {
+    "name": "ue_orders_with_promo",
+    "type": "INTEGER"
+  },
+  {
+    "name": "ue_orders_refunds",
+    "type": "INTEGER"
+  },
+  {
+    "name": "orders_cancelled",
+    "type": "INTEGER"
+  },
+  {
+    "name": "CVR",
+    "type": "FLOAT"
+  },
+  {
+    "name": "AOV",
+    "type": "NUMERIC"
+  },
+  {
+    "mode": "REQUIRED",
+    "name": "_timestamp",
+    "type": "TIMESTAMP"
+  },
+  {
+    "name": "active_visitor_flag",
+    "type": "STRING"
+  }
+]

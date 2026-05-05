@@ -1,0 +1,18 @@
+# Experiment Evaluation — {{ run_id }}
+
+Data through **{{ data_through }}**.
+
+## Scoreboard
+
+| Experiment | Label | AB-Filtered | AB-Overall | SEO DiD | Verdict | SRM |
+|---|---|---|---|---|---|---|
+{%- for name, exp in experiments.items() %}
+| {{ name }} | {{ exp.ab.label }} | {{ "%.2f"|format(exp.ab.raw.filtered.stats.mean_delta) }} (p={{ "%.3f"|format(exp.ab.raw.filtered.stats.p_value) }}) | {{ "%.2f"|format(exp.ab.raw.overall.stats.mean_delta) }} (p={{ "%.3f"|format(exp.ab.raw.overall.stats.p_value) }}) | {% if exp.seo and exp.seo.status == 'ok' %}{{ "%.1f"|format(exp.seo.did.clicks) }}pp{% else %}n/a{% endif %} | {{ exp.ab.raw.filtered.verdict }} | {{ exp.ab.srm.filtered.verdict }} |
+{%- endfor %}
+
+## Methodology
+- AB significance: paired t-test on daily metric, α=0.05.
+- SRM check: chi-square, α=0.001 (industry standard).
+- SRM remediation: re-run with `active_visitor_flag='Y'` when raw SRM fails.
+
+Full HTML report: `combined_report.html`.
