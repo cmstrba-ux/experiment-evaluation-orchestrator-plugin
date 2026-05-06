@@ -129,54 +129,6 @@ LEFT JOIN url_meta AS u USING (deal_uuid)
 LEFT JOIN deal_meta AS m USING (deal_uuid)
 WHERE u.deal_url IS NOT NULL;
 
--- name: resolve_control_urls
--- description: Sample matched control URL set for SEO DiD. URLs that are NOT in test_deals,
---   page_type='deals', root_domain='groupon.com', coupon_core_flag='core', in the same L2
---   categories as the variant set, ranked by pre-period impressions and capped per L2.
--- params: @alternate_name (STRING), @pre_start (DATE), @pre_end (DATE), @per_l2_cap (INT64, default 5000)
-WITH variant_l2 AS (
-  SELECT DISTINCT MAX(web_category_level_2) AS l2
-  FROM `kbc-grpn-40-0cd2.in_c_shr_dimension_datamart.deal_option`
-  WHERE LOWER(TRIM(deal_uuid)) IN (
-    SELECT LOWER(TRIM(deal_uuid))
-    FROM `kbc-grpn-40-0cd2.in_c_keboola_ex_google_drive_01kjaefgnqyrk1y6trtznth660.test_deals`
-    WHERE alternate_name = @alternate_name
-  )
-  GROUP BY deal_uuid
-),
-target_l2 AS (
-  SELECT DISTINCT l2 FROM variant_l2 WHERE l2 IS NOT NULL
-),
-variant_urls AS (
-  SELECT DISTINCT 'https://www.groupon.com/deals/' || deal_permalink AS full_url
-  FROM `kbc-grpn-40-0cd2.in_c_shr_dimension_datamart.deal_option`
-  WHERE LOWER(TRIM(deal_uuid)) IN (
-    SELECT LOWER(TRIM(deal_uuid))
-    FROM `kbc-grpn-40-0cd2.in_c_keboola_ex_google_drive_01kjaefgnqyrk1y6trtznth660.test_deals`
-    WHERE alternate_name = @alternate_name
-  )
-  AND deal_permalink IS NOT NULL
-),
-candidates AS (
-  SELECT
-    full_url,
-    category_level_2 AS l2,
-    SUM(impressions) AS pre_imp,
-    ROW_NUMBER() OVER (PARTITION BY category_level_2 ORDER BY SUM(impressions) DESC) AS rn
-  FROM `prj-grp-dataview-prod-1ff9.marketing.seo_datamart`
-  WHERE date BETWEEN @pre_start AND @pre_end
-    AND root_domain = 'groupon.com'
-    AND coupon_core_flag = 'core'
-    AND page_type = 'deals'
-    AND category_level_2 IN (SELECT l2 FROM target_l2)
-  GROUP BY full_url, category_level_2
-)
-SELECT c.full_url AS deal_url, c.l2 AS web_category_level_2, c.pre_imp
-FROM candidates c
-LEFT JOIN variant_urls v ON v.full_url = c.full_url
-WHERE v.full_url IS NULL
-  AND c.rn <= IFNULL(@per_l2_cap, 5000);
-
 -- name: seo_did_l2
 -- description: Aggregated impressions/clicks per group×L2×period for DiD calculation.
 --   Only used when computing DiD outside the seo-impact-analyzer (e.g. when control set
@@ -275,6 +227,31 @@ FROM base
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
 
+-- name: category_daily_by_l2
+-- description: Daily AB-Filtered per-category trends keyed by deal-level web_category_level_2,
+--   used for experiments WITHOUT explicit per-cat splits (use_deal_category_split=FALSE). Sources
+--   `review_experiments_deal` (deal-scoped); session-level `uv` is not available here, so the
+--   denominator for the M1 ratio is `udv` (unique deal-displayers). Caller MUST stamp
+--   `per_category[cat].denominator='udv'` so the renderer labels columns "M1/UDV" instead of "M1/UV".
+-- params: @alternate_name (STRING), @start_date (DATE), @end_date (DATE)
+SELECT
+  event_date,
+  web_category_level_2 AS category,
+  variantname,
+  SUM(udv) AS udv,
+  SUM(ue_orders) AS ue_orders,
+  SUM(margin_1_vfm) AS margin_1_vfm
+FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments_deal`
+WHERE event_date BETWEEN @start_date AND @end_date
+  AND (
+    experimentname = @alternate_name
+    OR experimentname LIKE CONCAT('% - ', @alternate_name)
+    OR experimentname LIKE CONCAT('% - ', @alternate_name, ' - %')
+  )
+  AND web_category_level_2 IS NOT NULL
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
+
 -- name: overall_per_cat_daily
 -- description: AB-Overall (population-wide) per-category daily stats. Each category split is
 --   its own GrowthBook experiment ('xp-mbnxt-XXXXX-ai-review-summary-<slug>'), so we query
@@ -300,7 +277,10 @@ ORDER BY 1, 2, 3;
 
 -- name: deal_top_winners_losers
 -- description: Top 10 winners + losers by margin_1_vfm uplift (treatment vs control) per deal.
--- params: @alternate_name (STRING), @start_date (DATE), @end_date (DATE)
+--   Caller must pass @ctrl_name matching the actual control variant in this experiment. The
+--   canonical convention is "control" (when present) or "true" (when variants are true/false);
+--   see run-ab-evaluation/SKILL.md "Variant naming convention".
+-- params: @alternate_name (STRING), @start_date (DATE), @end_date (DATE), @ctrl_name (STRING)
 WITH per_deal AS (
   SELECT
     deal_uuid, deal_url, deal_category, variantname,
@@ -317,8 +297,8 @@ WITH per_deal AS (
 pivoted AS (
   SELECT
     deal_uuid, deal_url, deal_category,
-    SUM(IF(variantname = 'control', m1, 0)) AS m1_ctrl,
-    SUM(IF(variantname != 'control', m1, 0)) AS m1_treat
+    SUM(IF(variantname = @ctrl_name, m1, 0)) AS m1_ctrl,
+    SUM(IF(variantname != @ctrl_name, m1, 0)) AS m1_treat
   FROM per_deal
   GROUP BY 1, 2, 3
 )
@@ -346,20 +326,3 @@ WHERE event_date BETWEEN @start_date AND @end_date
   )
 GROUP BY 1, 2;
 
--- name: deal_by_booking_platform
--- description: Aggregations by booking_platform.
--- params: @alternate_name (STRING), @start_date (DATE), @end_date (DATE)
-SELECT
-  booking_platform,
-  variantname,
-  COUNT(DISTINCT deal_uuid) AS deal_count,
-  SUM(udv) AS udv,
-  SUM(margin_1_vfm) AS m1
-FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments_deal`
-WHERE event_date BETWEEN @start_date AND @end_date
-  AND (
-    experimentname = @alternate_name
-    OR experimentname LIKE CONCAT('% - ', @alternate_name)
-    OR experimentname LIKE CONCAT('% - ', @alternate_name, ' - %')
-  )
-GROUP BY 1, 2;

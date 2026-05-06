@@ -10,10 +10,12 @@ description: Resolve test_deals deal_uuids → enriched URL list (deal_url, land
 
 ## Steps
 
-1. Run query `resolve_deal_urls` from `scripts/lib/bq_queries.sql` with parameter `@alternate_name`.
+1. Run query `resolve_deal_urls` from `<plugin-root>/scripts/lib/bq_queries.sql` (the file lives at the orchestrator plugin root, NOT inside this skill's directory — typically `…/local-marketplaces/<marketplace>/plugins/experiment-evaluation-orchestrator/scripts/lib/bq_queries.sql`) with parameter `@alternate_name`.
    Note: the underlying SQL filters `WHERE alternate_name = @alternate_name` against the `test_deals` table.
+   **Critical**: invoke `bq` with `--format=prettyjson` and **suppress stderr** (`2>/dev/null` on POSIX, `2>$null` on PowerShell). `bq query` writes `Waiting on bqjob_… RUNNING/DONE` progress lines to stdout if not formatted, which silently corrupts the downstream JSON file (observed in run `2026-05-06-10-26`: 947-byte progress prefix made `urls_FAQ_reviews.json` unparseable, causing the SEO subagent to fall into a manual recovery pipeline with the wrong DiD method).
 2. For every URL returned, assert `assert_no_mds(url)` from `scripts.lib.tool_contract` — refuse to forward MDS URLs.
-3. Emit JSON: `[{"deal_uuid":..., "deal_url":..., "landing_page":..., "web_category_level_1":..., "web_category_level_2":..., "merchant_uuid":..., "booking_platform":...}, ...]`.
+3. Before writing the JSON output file, validate that the captured stdout starts with `[` (after stripping leading whitespace). If it doesn't, search for the first `[{` substring and slice from there — but log a warning, since this means the formatting guard above failed.
+4. Emit JSON: `[{"deal_uuid":..., "deal_url":..., "landing_page":..., "web_category_level_1":..., "web_category_level_2":..., "merchant_uuid":..., "booking_platform":...}, ...]`.
 
 ## Reporting
 

@@ -5,12 +5,109 @@
 const ROOT = JSON.parse(document.getElementById('data').textContent);
 const charts = {};
 
+// Feature flag: when false the per-experiment "Overview" sub-tab (which holds the
+// detailed scorecard) is suppressed in the rendered HTML. The Executive Summary at
+// the top of the page is the primary scan surface; the analyst-grade scorecard is
+// kept in code (renderOverview + buildScorecardHtml are still defined and tested)
+// so we can re-enable by flipping this single flag without re-implementing anything.
+// Flip to `true` to bring back the Overview tab + scorecard.
+const SHOW_OVERVIEW_TAB = false;
+
 const fmtPct = x => (x>=0?'+':'') + (x*100).toFixed(2) + '%';
 const fmtPctOf = x => (x>=0?'+':'') + (x||0).toFixed(2) + '%';
 const fmtP = p => p < 0.001 ? '<0.001' : p.toFixed(3);
 const fmtMoney = x => (x>=0?'+':'') + '$' + Math.abs(x||0).toLocaleString(undefined,{maximumFractionDigits:0});
 const fmtMoney2 = x => (x>=0?'+':'') + '$' + Math.abs(x||0).toFixed(4);
 const fmtPp = x => (x>=0?'+':'') + (x||0).toFixed(2) + 'pp';
+
+// Compact number / money formatters for scope-of-experiment subtitles. Used by both
+// the Executive Summary cards and the Scorecard header to show UVs / M1 / Impressions /
+// Clicks at a glance without the visual noise of full toLocaleString counts.
+function compactNum(v) {
+  if (v == null || isNaN(v)) return 'n/a';
+  const a = Math.abs(v);
+  if (a >= 1e9) return (v/1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return (v/1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return (v/1e3).toFixed(1) + 'k';
+  return Math.round(v).toLocaleString();
+}
+function compactMoney(v) {
+  return (v == null || isNaN(v)) ? 'n/a' : '$' + compactNum(v);
+}
+
+// Sum AB scope (Total UVs + Total M1 VFM) across daily rows. Sources from raw.overall
+// (population-wide) so the totals match the headline AB metric cohort. Returns null
+// fields when the underlying daily rows lack the required keys.
+function abScopeTotals(D) {
+  const daily = D.raw_overall_daily || [];
+  if (!daily.length) return {uv: null, m1: null};
+  let uv = 0, m1 = 0, hasUv = false, hasM1 = false;
+  for (const r of daily) {
+    if (r.uv_ctrl != null || r.uv_treat != null) {
+      uv += (+(r.uv_ctrl) || 0) + (+(r.uv_treat) || 0); hasUv = true;
+    }
+    if (r.m1_ctrl != null || r.m1_treat != null) {
+      m1 += (+(r.m1_ctrl) || 0) + (+(r.m1_treat) || 0); hasM1 = true;
+    }
+  }
+  return {uv: hasUv ? uv : null, m1: hasM1 ? m1 : null};
+}
+
+// SEO scope: total post-period impressions + clicks for the Variant row in
+// summary_tables.overall (the experiment's own URLs after release). Falls back to
+// did.impressions / did.clicks when the summary_tables row isn't structured the way
+// the renderer expects. Returns null fields when the SEO subagent didn't run.
+function seoScopeTotals(D) {
+  const seo = D.seo || {};
+  if (seo.status !== 'ok') return {imp: null, clk: null};
+  const rows = ((seo.summary_tables || {}).overall) || [];
+  const variant = Array.isArray(rows) ? rows.find(r => String(r.label || '').startsWith('Variant')) : null;
+  if (variant) {
+    return {
+      imp: (variant.post_impressions != null) ? variant.post_impressions : null,
+      clk: (variant.post_clicks != null) ? variant.post_clicks : null,
+    };
+  }
+  const did = seo.did || {};
+  return {
+    imp: (did.post_impressions != null) ? did.post_impressions : null,
+    clk: (did.post_clicks != null) ? did.post_clicks : null,
+  };
+}
+
+// Compose the full scope subtitle (deals · window · days · UVs · M1 · impressions ·
+// clicks). Returns an HTML string with two-line layout: line 1 is scope, line 2 is
+// scale metrics. Used in both the Exec Summary card and the Scorecard so a viewer
+// gets the same context regardless of which surface they're looking at.
+function buildScopeSubtitle(D, opts) {
+  const wrapClass = (opts && opts.wrapClass) || 'exp-deals';
+  const line1Parts = [];
+  if (D.n_deals != null) line1Parts.push(`${Number(D.n_deals).toLocaleString()} deals`);
+  if (D.start_date && D.end_date) line1Parts.push(`${D.start_date} → ${D.end_date}`);
+  // Days running: prefer the unfiltered (raw.overall) n — that's the count of daily
+  // rows the AB stats are actually computed on. Fall back to a date-arithmetic
+  // estimate when daily rows aren't loaded.
+  const om = D.unfiltered_m1uv || D.overall_m1uv || null;
+  let nDays = om ? om.n : null;
+  if (nDays == null && D.start_date && D.end_date) {
+    const ms = (Date.parse(D.end_date) - Date.parse(D.start_date));
+    if (!isNaN(ms)) nDays = Math.round(ms / 86400000) + 1;
+  }
+  if (nDays != null) line1Parts.push(`${nDays} day${nDays === 1 ? '' : 's'}`);
+
+  const ab = abScopeTotals(D);
+  const seo = seoScopeTotals(D);
+  const line2Parts = [];
+  if (ab.uv != null) line2Parts.push(`${compactNum(ab.uv)} UVs`);
+  if (ab.m1 != null) line2Parts.push(`${compactMoney(ab.m1)} M1 VFM`);
+  if (seo.imp != null) line2Parts.push(`${compactNum(seo.imp)} impressions`);
+  if (seo.clk != null) line2Parts.push(`${compactNum(seo.clk)} clicks`);
+
+  let html = '';
+  if (line1Parts.length) html += `<div class="${wrapClass}">${line1Parts.join(' · ')}</div>`;
+  if (line2Parts.length) html += `<div class="${wrapClass} ${wrapClass}-scale">${line2Parts.join(' · ')}</div>`;
+  return html;
+}
 
 function colorFor(pct) {
   const x = Math.max(-3, Math.min(3, pct||0)) / 3;
@@ -21,6 +118,41 @@ function seoColor(pp) {
   const x = Math.max(-30, Math.min(30, pp||0)) / 30;
   if (x >= 0) return `rgba(56,161,105,${0.15 + 0.55*x})`;
   return `rgba(229,62,62,${0.15 + 0.55*(-x)})`;
+}
+
+// Generic metric-row tint: scales `pct` to ±`scale` for full saturation, deepens
+// when `p < 0.05`. Returns null for missing values so callers can render a
+// transparent row. Scales differ by metric: AB %Δ uses ±3, SEO %Δ uses ±15,
+// SEO CTR pp uses ±1, expected-funnel uses ±5.
+function metricTint(pct, p, scale) {
+  if (pct == null || isNaN(pct)) return null;
+  const max = scale || 3;
+  const x = Math.max(-max, Math.min(max, pct||0)) / max;
+  const sig = p != null && p < 0.05;
+  const opacity = sig ? (0.30 + 0.45*Math.abs(x)) : (0.10 + 0.25*Math.abs(x));
+  if (x >= 0) return `rgba(56,161,105,${opacity.toFixed(3)})`;
+  return `rgba(229,62,62,${opacity.toFixed(3)})`;
+}
+
+// Compose AB margin uplift with SEO traffic uplift into a directional total. M1/UV
+// already captures CVR effects within the experiment population, so we only multiply
+// it with SEO clicks %Δ — multiplying a third CVR factor would double-count. Returns
+// null when both inputs are missing; falls back to whichever is present otherwise.
+function expectedFunnelTotal(clicksPct, m1uvPct) {
+  if (clicksPct == null && m1uvPct == null) return null;
+  const c = (clicksPct == null ? 0 : clicksPct) / 100;
+  const m = (m1uvPct == null ? 0 : m1uvPct) / 100;
+  return ((1 + c) * (1 + m) - 1) * 100;
+}
+
+// MPV = margin per order. Derived from M1/UV and CVR so the funnel decomposition
+// (Traffic × Conversion × Margin/order) sums back to M1/UV without double-counting:
+//   (1+M1UV%) = (1+CVR%) × (1+MPV%)  →  MPV% = (1+M1UV%)/(1+CVR%) - 1
+function mpvFromM1UVAndCVR(m1uvPct, cvrPct) {
+  if (m1uvPct == null || cvrPct == null) return null;
+  const denom = 1 + cvrPct/100;
+  if (Math.abs(denom) < 1e-9) return null;
+  return ((1 + m1uvPct/100) / denom - 1) * 100;
 }
 
 function lineChart(id, daily, ctrlKey, treatKey, ylabel) {
@@ -43,60 +175,499 @@ function lineChart(id, daily, ctrlKey, treatKey, ylabel) {
 function header() {
   const meta = document.getElementById('hdr-meta');
   const names = Object.keys(ROOT.experiments);
-  meta.textContent = `${names.length} experiment${names.length!==1?'s':''} · run ${ROOT.run_id} · data through ${ROOT.data_through}`;
+  const expLabel = `${names.length} experiment${names.length!==1?'s':''}`;
+  meta.innerHTML = `
+    <span class="stat"><strong>${expLabel}</strong></span>
+    <span class="stat">run <strong>${ROOT.run_id}</strong></span>
+    <span class="stat">data through <strong>${ROOT.data_through}</strong></span>`;
 }
 
-function scoreboard() {
-  const root = document.getElementById('scoreboard');
-  Object.entries(ROOT.experiments).forEach(([name, D]) => {
-    const f = D.ab_filtered_stats || {};
-    const o = D.ab_overall_stats || {};
+// Upstream summary_tables helpers — mirrors render.py::_seo_l2_row_lookup +
+// _seo_l2_ctr_did_pp. Per-L2 CTR DiD must be derived in JS too because the
+// Python build_payload only computes the *overall* CTR DiD; per-L2 stays
+// inline so no payload is duplicated.
+
+// AB-side L2 abbreviations → upstream's full L2 names. The heatmap is keyed on
+// the AB category name; upstream emits human-readable category labels in the
+// summary_tables `Variant — L2: <L1> / <L2>` format. When AB uses "TTD" and
+// upstream uses "Things to Do", the suffix match would otherwise miss.
+// Lookups are case-insensitive; values can be a string or a list of synonyms.
+const _L2_ALIASES = {
+  'TTD': 'Things to Do',
+  'HBW': 'Beauty & Spas',
+};
+
+function _l2Candidates(l2Name) {
+  // Returns the lowercase set of suffixes to try matching against upstream rows
+  // for the given AB category name (the original, plus any alias).
+  const out = new Set();
+  if (l2Name == null) return out;
+  const original = String(l2Name).trim();
+  if (original) out.add(original.toLowerCase());
+  const upper = original.toUpperCase();
+  const alias = _L2_ALIASES[upper];
+  if (alias) {
+    if (Array.isArray(alias)) alias.forEach(a => out.add(String(a).trim().toLowerCase()));
+    else out.add(String(alias).trim().toLowerCase());
+  }
+  return out;
+}
+
+function _l2LabelSuffix(label) {
+  if (typeof label !== 'string') return null;
+  const i = label.indexOf(': ');
+  if (i < 0) return null;
+  const after = label.slice(i + 2).trim();
+  if (after.indexOf('/') >= 0) {
+    return after.slice(after.lastIndexOf('/') + 1).trim();
+  }
+  return after;
+}
+
+function _seoL2VariantRow(seo, l2Name) {
+  const block = ((((seo || {}).summary_tables || {}).by_category) || {}).L2;
+  if (!block || !block.available) return null;
+  const targets = _l2Candidates(l2Name);
+  if (!targets.size) return null;
+  for (const row of (block.rows || [])) {
+    const label = row.label || '';
+    if (!label.startsWith('Variant')) continue;
+    const suffix = _l2LabelSuffix(label);
+    if (suffix && targets.has(suffix.trim().toLowerCase())) return row;
+  }
+  return null;
+}
+
+function _seoL2PeerRow(seo, l2Name) {
+  const block = ((((seo || {}).summary_tables || {}).by_category) || {}).L2;
+  if (!block || !block.available) return null;
+  const targets = _l2Candidates(l2Name);
+  if (!targets.size) return null;
+  for (const row of (block.rows || [])) {
+    const label = row.label || '';
+    if (!label.startsWith('All Groupon')) continue;
+    const suffix = _l2LabelSuffix(label);
+    if (suffix && targets.has(suffix.trim().toLowerCase())) return row;
+  }
+  return null;
+}
+
+function _ctrChangePp(row) {
+  if (!row) return null;
+  const preI = row.pre_impressions || 0;
+  const postI = row.post_impressions || 0;
+  if (preI <= 0 || postI <= 0) return null;
+  const preC = row.pre_clicks || 0;
+  const postC = row.post_clicks || 0;
+  return ((postC / postI) - (preC / preI)) * 100.0;
+}
+
+function _seoL2CtrDidPp(seo, l2Name) {
+  const v = _seoL2VariantRow(seo, l2Name);
+  const p = _seoL2PeerRow(seo, l2Name);
+  if (!v || !p) return null;
+  const vPp = _ctrChangePp(v);
+  const pPp = _ctrChangePp(p);
+  if (vPp == null || pPp == null) return null;
+  return vPp - pPp;
+}
+
+// Shared verdict-to-badge color mapping for both AB and SEO scoreboard chips.
+// Case-insensitive (some upstream paths emit lowercase). Unknown values fall to
+// `badge-prelim` (amber) rather than `badge-fail` (red) — a missing/unrecognised
+// verdict is ambiguous, not bad.
+function verdictBadgeCls(verdict) {
+  const v = String(verdict == null ? '' : verdict).trim().toUpperCase();
+  if (v === 'SHIP' || v === 'POSITIVE') return 'badge-pass';
+  if (v === 'KILL' || v === 'NEGATIVE' || v === 'PAUSE') return 'badge-fail';
+  if (v === 'REDESIGN') return 'badge-fail';
+  if (v === 'HOLD' || v === 'EXTEND' || v === 'EARLY' || v === 'INCONCLUSIVE' || v === 'MIXED') return 'badge-prelim';
+  return 'badge-prelim';
+}
+
+// CEO Executive Summary — top-level view above the analyst scoreboard. Each card
+// renders the experiment name + verdict badges, four headline metric tiles
+// (M1/UV %Δ, CVR %Δ, SEO Clicks DiD, composed Total margin %Δ), and a one-sentence
+// takeaway (preferred from the evaluator's hand-written narrative; synthesized when
+// the .docx narrative isn't available). Designed for a 30-second scan: sign of each
+// metric is encoded by tile color, magnitude is the visible number, takeaway answers
+// "so what".
+function renderExecSummary() {
+  const root = document.getElementById('exec-summary');
+  if (!root) return;
+  const exps = Object.entries(ROOT.experiments);
+  if (!exps.length) { root.innerHTML = '<p class="muted">No experiments to summarize.</p>'; return; }
+
+  // Top-level tally. Counts SHIP / KILL / other (HOLD, INCONCLUSIVE, EXTEND, prelim).
+  const decisions = exps.map(([n, D]) => (D.ab_filtered_verdict || '').toUpperCase());
+  const ships = decisions.filter(v => v === 'SHIP').length;
+  const kills = decisions.filter(v => v === 'KILL').length;
+  const others = exps.length - ships - kills;
+  const tally = `
+    <span class="tally"><strong>${exps.length}</strong> experiment${exps.length!==1?'s':''} evaluated</span>
+    <span class="tally"><strong>${ships}</strong> ship</span>
+    <span class="tally"><strong>${kills}</strong> kill</span>
+    <span class="tally"><strong>${others}</strong> other / inconclusive</span>`;
+
+  const cards = exps.map(([n, D]) => buildExecCard(n, D)).join('');
+  root.innerHTML = `<div class="exec-overview">${tally}</div><div class="exec-cards">${cards}</div>`;
+}
+
+// Per-experiment exec card. Pulls the same headline values the scorecard uses
+// (unfiltered / population-wide AB metrics + SEO DiD vs synthetic peer + composed funnel).
+function buildExecCard(name, D) {
+  const verdict = (D.ab_filtered_verdict || '').toUpperCase();
+  const om = D.unfiltered_m1uv || D.overall_m1uv || null;
+  const oc = D.unfiltered_cvr  || D.overall_cvr  || null;
+  const did = (D.seo && D.seo.did) || {};
+  const power = (D.seo && D.seo.power_analysis) || {};
+  const m1uvPct = om ? om.mean_delta_pct : null;
+  const m1uvP   = om ? om.p_value : null;
+  const cvrPct  = oc ? oc.mean_delta_pct : null;
+  const cvrP    = oc ? oc.p_value : null;
+  const clkPct  = (did.did_clicks_pct == null) ? null : did.did_clicks_pct;
+  const seoP    = power.p_value;
+  const totalPct = expectedFunnelTotal(clkPct, m1uvPct);
+
+  const verdictCardCls = verdict === 'SHIP' ? 'exec-ship' : verdict === 'KILL' ? 'exec-kill' : 'exec-other';
+  const verdictBadgeCls2 = verdict === 'SHIP' ? 'badge-verdict-ship' : verdict === 'KILL' ? 'badge-verdict-kill' : 'badge-verdict-neutral';
+  const labelBadgeCls = (D.ab_label || '').startsWith('FINAL') ? 'badge-final' : 'badge-prelim';
+
+  // Tile sign-classification thresholds: AB %Δ uses ±0.5% (anything inside is noise),
+  // SEO clicks pp uses ±1pp (the typical noise floor on partial-signal SEO runs).
+  const tile = (label, val, p, sigThresh) => {
+    if (val == null || isNaN(val)) {
+      return `<div class="exec-tile na"><div class="exec-tlabel">${label}</div><div class="exec-tval">n/a</div></div>`;
+    }
+    const cls = val > sigThresh ? 'pos' : val < -sigThresh ? 'neg' : 'neu';
+    const sigClass = (p != null && p < 0.05) ? ' sig' : '';
+    const star = (p != null && p < 0.05) ? '<span class="exec-tstar">★</span>' : '';
+    const pStr = (p != null) ? `<div class="exec-tp">p=${fmtP(p)}</div>` : '';
+    return `<div class="exec-tile ${cls}${sigClass}">
+      <div class="exec-tlabel">${label}</div>
+      <div class="exec-tval">${fmtPctOf(val)}${star}</div>
+      ${pStr}
+    </div>`;
+  };
+
+  // Two-line subtitle for the exec card: scope (deals · window · days) + scale (UVs ·
+  // M1 · impressions · clicks). Same content the scorecard shows so a viewer gets the
+  // same context wherever they look. wrapClass is exec-card-subtitle so styling matches
+  // the card's typography.
+  const subtitleHtml = buildScopeSubtitle(D, {wrapClass: 'exec-card-subtitle'});
+  const expName = D.alternate_name || name;
+  const takeawayHtml = renderExecTakeaway(D);
+
+  return `<div class="exec-card ${verdictCardCls}">
+    <div class="exec-card-header">
+      <div class="exec-card-name">${escapeText(expName)}</div>
+      <div class="exec-card-badges">
+        <span class="badge ${labelBadgeCls}">${escapeText(D.ab_label || '?')}</span>
+        <span class="badge ${verdictBadgeCls2}">${verdict || '?'}</span>
+      </div>
+    </div>
+    ${subtitleHtml}
+    <div class="exec-card-tiles">
+      ${tile('Total estimated margin impact', totalPct, null, 0.5)}
+      ${tile('M1/UV %Δ',                      m1uvPct, m1uvP, 0.5)}
+      ${tile('CVR %Δ',                        cvrPct,  cvrP,  0.5)}
+      ${tile('SEO Clicks',                    clkPct,  seoP,  1.0)}
+    </div>
+    ${takeawayHtml}
+  </div>`;
+}
+
+// Render the multi-line "Takeaway" block in the Exec Summary card. Three rows:
+//   1. Confidence — explicit statement of statistical significance (which metrics
+//      reached p<0.05, which didn't). Avoids the failure mode of a CEO reading a
+//      bold number and assuming it's a confirmed effect when it's actually n.s.
+//      When overall is not significant, surfaces subset-level significance from
+//      the evaluator narrative (e.g., "Web subset shows Cohen's d=0.345").
+//   2. Why — one sentence from the evaluator's narrative (or synthesized)
+//      explaining what drove the result.
+//   3. Action — first action item from the evaluator narrative or a synthesized
+//      recommendation aligned with the verdict.
+function renderExecTakeaway(D) {
+  const verdict = (D.ab_filtered_verdict || '').toUpperCase();
+  const om = D.unfiltered_m1uv || D.overall_m1uv || null;
+  const oc = D.unfiltered_cvr  || D.overall_cvr  || null;
+  const did = (D.seo && D.seo.did) || {};
+  const seoP = ((D.seo && D.seo.power_analysis) || {}).p_value;
+  const m1uvSig = !!(om && om.p_value != null && om.p_value < 0.05);
+  const cvrSig  = !!(oc && oc.p_value != null && oc.p_value < 0.05);
+  const seoSig  = !!(seoP != null && seoP < 0.05);
+
+  // Confidence row. Three states: full significance, partial, none. When none of the
+  // three primary metrics reached p<0.05, lean on the evaluator's "What remains
+  // uncertain" narrative — that's where subset-level (per-platform / per-category)
+  // significance often hides for tests with weak overall signal.
+  const sigParts = [];
+  if (m1uvSig) sigParts.push('M1/UV');
+  if (cvrSig) sigParts.push('CVR');
+  if (seoSig) sigParts.push('SEO');
+  let confidenceCls = 'exec-conf-low';
+  let confidenceText;
+  if (sigParts.length === 0) {
+    confidenceCls = 'exec-conf-low';
+    confidenceText = `<strong>Not statistically significant</strong> — no headline metric reached p&lt;0.05; numbers are <em>directional only</em>.`;
+    // Hint at subset evidence when present in the narrative.
+    const narr = D.evaluation_narrative || {};
+    const platformHint = (narr.step_3_platform_results && narr.step_3_platform_results.length)
+      ? narr.step_3_platform_results.find(it => /web|touch|desktop|mobile/i.test(it.text))
+      : null;
+    if (platformHint) {
+      confidenceText += ` See platform breakdown — significance may concentrate in a subset.`;
+    }
+  } else if (sigParts.length === 3) {
+    confidenceCls = 'exec-conf-high';
+    confidenceText = `<strong>Statistically significant on all three headline metrics</strong> (M1/UV, CVR, SEO at p&lt;0.05).`;
+  } else {
+    confidenceCls = 'exec-conf-mid';
+    confidenceText = `<strong>Statistically significant on ${sigParts.join(' &amp; ')}</strong> (p&lt;0.05); other headline metrics directional only.`;
+  }
+
+  // "Why" row — pull a substantive sentence from the evaluator narrative when present.
+  // First bullet of "What the data shows" is hand-curated; preferred. Falls back to
+  // step bodies, then synthesis.
+  const whyText = execTakeaway(D);
+
+  // "Action" row — first action item if available; else a recommendation aligned with
+  // verdict + significance. We avoid prescribing SHIP/KILL when significance is low
+  // since the evaluator may have done it on practical grounds — defer to their action
+  // list when the doc has one.
+  const narr = D.evaluation_narrative || {};
+  let actionText;
+  if (narr.action_items && narr.action_items.length) {
+    actionText = narr.action_items[0].text;
+  } else if (verdict === 'KILL' && sigParts.length > 0) {
+    actionText = `Recommend KILL — significant negative signal.`;
+  } else if (verdict === 'KILL') {
+    actionText = `Recommend KILL on practical grounds — direction is negative even though overall p≥0.05.`;
+  } else if (verdict === 'SHIP' && sigParts.length > 0) {
+    actionText = `Recommend SHIP — significant positive signal.`;
+  } else if (verdict === 'SHIP') {
+    actionText = `Recommend SHIP on practical grounds — direction is positive even though overall p≥0.05.`;
+  } else if (sigParts.length === 0) {
+    actionText = `Hold or extend. Overall result is inconclusive; check subsets before deciding.`;
+  } else {
+    actionText = `Verdict ${verdict} — see full evaluation report for context.`;
+  }
+
+  return `
+    <div class="exec-takeaway">
+      <div class="exec-takeaway-row exec-conf ${confidenceCls}"><span class="exec-tk-label">Confidence</span><span>${confidenceText}</span></div>
+      <div class="exec-takeaway-row"><span class="exec-tk-label">Why</span><span>${escapeText(whyText)}</span></div>
+      <div class="exec-takeaway-row"><span class="exec-tk-label">Action</span><span>${escapeText(actionText)}</span></div>
+    </div>`;
+}
+
+// Pick a single CEO-grade sentence for the exec card. Priority order:
+//   1. First bullet of evaluator's "What the data shows" (hand-curated, most reliable)
+//   2. First action item ("Stop the experiment immediately…")
+//   3. First sentence of "Final recommendation" prose
+//   4. First sentence of "Executive summary" (rarely present in current docx layouts)
+//   5. First sentence of Step 7 (practical-significance) prose — fallback for docs
+//      where the curated subsections are empty (AI_Summaries pattern)
+//   6. Synthesized sentence from headline metrics (last resort, when no docx loaded)
+function execTakeaway(D) {
+  const n = D.evaluation_narrative || {};
+  const firstSentence = (s) => {
+    const m = String(s || '').match(/^[^.!?]+[.!?]/);
+    return (m ? m[0] : String(s || '').slice(0, 220)).trim();
+  };
+  if (n.what_the_data_shows && n.what_the_data_shows.length) {
+    return firstSentence(n.what_the_data_shows[0].text);
+  }
+  if (n.action_items && n.action_items.length) {
+    return firstSentence(n.action_items[0].text);
+  }
+  if (n.final_recommendation && n.final_recommendation.length) {
+    return firstSentence(n.final_recommendation[0].text);
+  }
+  if (n.executive_summary) {
+    return firstSentence(n.executive_summary);
+  }
+  if (n.step_7_practical && n.step_7_practical.length) {
+    return firstSentence(n.step_7_practical[0].text);
+  }
+  // Fallback synthesis. Keep it short — CEO-grade sentence, not analyst prose.
+  const verdict = (D.ab_filtered_verdict || '').toUpperCase();
+  const om = D.unfiltered_m1uv || D.overall_m1uv || null;
+  const oc = D.unfiltered_cvr  || D.overall_cvr  || null;
+  const did = (D.seo && D.seo.did) || {};
+  const m1 = om ? om.mean_delta_pct : null;
+  const cv = oc ? oc.mean_delta_pct : null;
+  const ck = (did.did_clicks_pct == null) ? null : did.did_clicks_pct;
+  const fmt = (v) => v == null ? 'n/a' : fmtPctOf(v);
+  if (verdict === 'KILL') return `Recommend KILL — M1/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — net negative funnel.`;
+  if (verdict === 'SHIP') return `Recommend SHIP — M1/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — net positive funnel.`;
+  return `Inconclusive — M1/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — needs more data or clearer signal.`;
+}
+
+// Builds the per-experiment scorecard HTML used inside the new Overview sub-tab.
+// Replaces the global scoreboard() function — the Executive Summary now owns the
+// page-level scan, while the scorecard delivers the analyst-grade detail per
+// experiment. Returns a single .card HTML string; caller wraps with .scoreboard.
+function buildScorecardHtml(name, D) {
     const v = D.ab_filtered_verdict || '?';
     const cls = v === 'SHIP' ? 'win' : v === 'KILL' ? 'lose' : 'flat';
+    // FINAL: neutral gray (no green) — completion is not a result. PRELIM keeps amber
+    // because in-progress runs do warrant a visual reminder.
     const labelBadge = (D.ab_label||'').startsWith('FINAL') ? 'badge-final' : 'badge-prelim';
-    const srm = (D.srm_filtered||{}).verdict || 'pass';
-    const srmBadge = srm === 'pass' ? 'badge-pass' : 'badge-fail';
-    const om = D.overall_m1uv, oc = D.overall_cvr;
 
-    // SEO headline block: prefer DiD when available; fall back to variant-only raw pre/post.
-    const seoStatus = D.seo && D.seo.status === 'ok';
-    const did = (D.seo && D.seo.did_overall && D.seo.did_overall.did) || {};
-    const seoSig = D.seo && D.seo.signal_level;
-    const seoBadgeCls = seoSig === 'full' ? 'badge-pass' : seoSig === 'partial' ? 'badge-prelim' : 'badge-fail';
-    let seoBlock = '';
-    if (seoStatus) {
-      if (Object.keys(did).length) {
-        seoBlock = `
-          <div class="row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><span class="lbl"><strong>SEO DiD</strong> · signal</span><span><span class="badge ${seoBadgeCls}">${seoSig}</span></span></div>
-          <div class="row"><span class="lbl">Impressions DiD</span><span>${fmtPp(did.imp_pp ?? 0)}</span></div>
-          <div class="row"><span class="lbl">Clicks DiD</span><span>${fmtPp(did.clk_pp ?? 0)}</span></div>
-          <div class="row"><span class="lbl">CTR DiD</span><span>${fmtPp(did.ctr_pp ?? 0)}</span></div>`;
-      } else {
-        const ov = ((D.seo.pre_post)||{}).overall || {};
-        seoBlock = `
-          <div class="row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:8px"><span class="lbl"><strong>SEO</strong> · signal</span><span><span class="badge ${seoBadgeCls}">${seoSig||'?'}</span> <span class="muted" style="font-size:0.78rem">no control</span></span></div>
-          <div class="row"><span class="lbl">Impressions Δ (variant raw)</span><span>${fmtPctOf(ov.impressions_pct_total||0)}</span></div>
-          <div class="row"><span class="lbl">Clicks Δ (variant raw)</span><span>${fmtPctOf(ov.clicks_pct_total||0)}</span></div>`;
-      }
+    // SRM source: prefer the unfiltered (raw.overall) SRM since the AB hero metrics also
+    // come from raw.overall. Falls back to filtered SRM if overall is missing.
+    const srmObj = (D.srm_overall && Object.keys(D.srm_overall).length) ? D.srm_overall : (D.srm_filtered || {});
+    const srm = srmObj.verdict || 'pass';
+    const srmPromoted = srmObj.promoted_from === 'remediated';
+    // Pill visibility: hide when SRM passes cleanly (the common case — pill adds noise).
+    // Show neutral when active-visitor remediation kicked in (post-remediation pass is the
+    // current value, so "warning, not error"). Show red on hard fail (important to flag).
+    let srmPillHtml = '';
+    if (srmPromoted) {
+      srmPillHtml = `<span class="badge badge-neutral" title="raw bcookie SRM failed; active_visitor remediation passed (chi² p=${fmtP(srmObj.p_value||1)})">SRM remediated (active_visitor)</span>`;
+    } else if (srm !== 'pass') {
+      srmPillHtml = `<span class="badge badge-fail">SRM ${srm}</span>`;
     }
 
-    const card = document.createElement('div');
-    card.className = `card ${cls}`;
-    card.innerHTML = `
+    // AB hero metric source: unfiltered (population-wide) M1/UV + CVR from raw.overall.daily.
+    // Falls back to legacy overall_m1uv / overall_cvr when the unfiltered shape isn't present.
+    const om = D.unfiltered_m1uv || D.overall_m1uv || null;
+    const oc = D.unfiltered_cvr  || D.overall_cvr  || null;
+    const m1uvPct = om ? om.mean_delta_pct : null;
+    const m1uvP   = om ? om.p_value : null;
+    const cvrPct  = oc ? oc.mean_delta_pct : null;
+    const cvrP    = oc ? oc.p_value : null;
+
+    // SEO headline values (clicks / impressions only — DiD CTR pp dropped from card).
+    const seoStatus = D.seo && D.seo.status === 'ok';
+    const did = (D.seo && D.seo.did) || {};
+    const power = (D.seo && D.seo.power_analysis) || {};
+    const seoVerdict = seoStatus ? ((D.seo && D.seo.verdict) || '?') : null;
+    const impPct = (did.did_impressions_pct == null) ? null : did.did_impressions_pct;
+    const clkPct = (did.did_clicks_pct == null) ? null : did.did_clicks_pct;
+    const seoP   = power.p_value;
+    const seoSig = D.seo && D.seo.signal_level;
+    const seoSigBadgeCls = seoSig === 'full' ? 'badge-pass' : seoSig === 'partial' ? 'badge-prelim' : 'badge-fail';
+
+    // Funnel composition. Traffic × Conversion × Margin/order. MPV is derived from
+    // M1/UV and CVR so the three stages compose cleanly back to (1+SEO)(1+M1UV)-1.
+    const mpvPct = mpvFromM1UVAndCVR(m1uvPct, cvrPct);
+    const totalPct = expectedFunnelTotal(clkPct, m1uvPct);
+
+    // Renders one colored metric row. `kind` is 'pct' for percentages or 'pp' for
+    // percentage points; `scale` controls saturation breakpoint for tint intensity.
+    const metricRow = (label, val, p, scale, kind, hero) => {
+      const fmt = kind === 'pp' ? fmtPp : fmtPctOf;
+      const cls2 = 'metric-row' + (hero ? ' hero' : '');
+      if (val == null || isNaN(val)) {
+        return `<div class="${cls2}"><span class="lbl">${label}</span><span class="muted">n/a</span></div>`;
+      }
+      const bg = metricTint(val, p, scale);
+      const sigStar = (p != null && p < 0.05) ? ' <span class="sigstar">★</span>' : '';
+      const pStr = (p != null) ? `<span class="pmeta">p=${fmtP(p)}</span>` : '';
+      return `<div class="${cls2}" style="background:${bg||'transparent'}">
+                <span class="lbl">${label}</span>
+                <span><strong>${fmt(val)}</strong>${sigStar}${pStr}</span>
+              </div>`;
+    };
+
+    // Header: experiment name, then deals subtitle (small font), then label + (optional)
+    // SRM pill. SRM pill suppressed entirely on clean pass.
+    // Scorecard subtitle: scope + scale. Reuses the same buildScopeSubtitle helper as
+    // the exec summary cards so analyst and CEO views show identical context.
+    const dealsSubtitle = buildScopeSubtitle(D, {wrapClass: 'exp-deals'});
+    const headerHtml = `
       <h3>${name}</h3>
-      <div style="margin:6px 0">
+      ${dealsSubtitle}
+      <div style="margin:6px 0 10px">
         <span class="badge ${labelBadge}">${D.ab_label||'?'}</span>
-        <span class="badge ${srmBadge}">SRM ${srm}</span>
-      </div>
-      ${om ? `<div class="row"><span class="lbl">M1/UV Δ (filtered)</span><span>${fmtPctOf(om.mean_delta_pct)} (p=${fmtP(om.p_value)})</span></div>` : `<div class="row"><span class="lbl">Filtered MPV mean Δ</span><span>$${(f.mean_delta||0).toFixed(4)} (p=${fmtP(f.p_value||1)})</span></div>`}
-      ${oc ? `<div class="row"><span class="lbl">CVR Δ (filtered)</span><span>${fmtPctOf(oc.mean_delta_pct)} (p=${fmtP(oc.p_value)})</span></div>` : ''}
-      <div class="row"><span class="lbl">Overall MPV mean Δ</span><span>$${(o.mean_delta||0).toFixed(4)} (p=${fmtP(o.p_value||1)})</span></div>
-      ${(D.srm_filtered||{}).chi_sq !== undefined ? `<div class="row"><span class="lbl">SRM χ²</span><span>${(D.srm_filtered.chi_sq||0).toFixed(3)} (p=${fmtP(D.srm_filtered.p_value||1)})</span></div>` : ''}
-      ${seoBlock}
-      <div class="verdict">→ ${v}</div>
-    `;
-    root.appendChild(card);
-  });
+        ${srmPillHtml}
+      </div>`;
+
+    // Expected funnel impact — top section. Two-tier explanation:
+    //   1. The honest math (what we actually compute): Traffic × Margin-per-visitor.
+    //      M1/UV is the AB margin-per-visitor metric and ALREADY captures CVR + MPV;
+    //      we never multiply three independent factors.
+    //   2. The decomposition (what's inside Margin-per-visitor): CVR × Margin-per-order.
+    //      Margin-per-order is derived as (1+M1/UV)/(1+CVR)−1 so the decomposition
+    //      sums back to M1/UV exactly.
+    // The full formula + double-counting note moved to the Details block.
+    let expectedSection = '';
+    if (totalPct != null) {
+      const fmtSign = (v) => v == null ? 'n/a' : fmtPctOf(v);
+      const totalLine = (clkPct != null && m1uvPct != null)
+        ? `<strong>Traffic ${fmtSign(clkPct)}</strong> × <strong>Margin/visitor ${fmtSign(m1uvPct)}</strong> = <strong>${fmtSign(totalPct)}</strong>`
+        : (m1uvPct != null
+            ? `<strong>Margin/visitor ${fmtSign(m1uvPct)}</strong> (no SEO traffic signal — total is the AB margin uplift only)`
+            : `<strong>Traffic ${fmtSign(clkPct)}</strong> (no AB margin signal)`);
+      const decompLine = (cvrPct != null && mpvPct != null)
+        ? `<span style="color:#a0aec0">Margin/visitor decomposes as: CVR ${fmtSign(cvrPct)} × Margin/order ${fmtSign(mpvPct)}</span>`
+        : '';
+      expectedSection = `
+        <div class="sec-title">Estimated total margin impact</div>
+        ${metricRow('Total margin %Δ', totalPct, null, 5, 'pct', true)}
+        <div class="funnel-detail">
+          ${totalLine}
+          ${decompLine ? `<br>${decompLine}` : ''}
+        </div>`;
+    }
+
+    // AB Test section — colored, important metrics first. Sourced from raw.overall
+    // (population-wide / unfiltered) so the headline matches the canonical AB test result.
+    const abSection = `
+      <div class="sec-title">AB Population-wide</div>
+      ${metricRow('M1/UV %Δ', m1uvPct, m1uvP, 3, 'pct', true)}
+      ${metricRow('CVR %Δ',   cvrPct,  cvrP,  3, 'pct', false)}
+      <div class="row" style="padding-top:6px"><span class="lbl">AB verdict</span><span><span class="badge ${verdictBadgeCls(v)}">${v}</span></span></div>`;
+
+    // SEO section — colored DiD clicks / impressions only (CTR pp removed; was rarely
+    // populated and added noise).
+    let seoSection = '';
+    if (seoStatus) {
+      seoSection = `
+        <div class="sec-title">SEO (DiD vs synthetic peer)</div>
+        ${metricRow('DiD Clicks %',      clkPct, seoP, 15, 'pct', true)}
+        ${metricRow('DiD Impressions %', impPct, seoP, 15, 'pct', false)}
+        <div class="row" style="padding-top:6px"><span class="lbl">SEO verdict</span><span><span class="badge ${verdictBadgeCls(seoVerdict)}">${seoVerdict}</span> <span class="badge ${seoSigBadgeCls}">${seoSig||'?'}</span></span></div>`;
+    } else if (D.seo) {
+      seoSection = `
+        <div class="sec-title">SEO</div>
+        <div class="row"><span class="lbl">Status</span><span class="muted">${D.seo.status||'unknown'}${D.seo.reason ? ' — ' + D.seo.reason : ''}</span></div>`;
+    }
+
+    // De-emphasized details — collapsed; no coloring; muted text. Funnel formula text,
+    // SRM χ² rows (always — both clean and remediated cases), runway projection, and the
+    // SEO peer-cohort caveat all live here.
+    const runway = D.runway_filtered;
+    let runwayLine = '';
+    if (runway && !runway.already_significant) {
+      if (runway.infeasible) {
+        runwayLine = `<div class="row"><span class="lbl">Runway to p&lt;0.05</span><span class="muted">infeasible (${runway.reason || 'effect too flat'})</span></div>`;
+      } else if (runway.additional_days != null) {
+        runwayLine = `<div class="row"><span class="lbl">Runway to p&lt;0.05</span><span class="muted">+${runway.additional_days}d (need ~${runway.n_required}d total)</span></div>`;
+      }
+    }
+    let funnelFormulaLine = '';
+    if (totalPct != null) {
+      const note = (clkPct == null)
+        ? 'Formula: total = AB M1/UV %Δ (no SEO traffic signal to compose with).'
+        : 'Formula: total = (1 + SEO clicks %Δ) × (1 + AB M1/UV %Δ) − 1. M1/UV already includes CVR × margin-per-order, so we don\'t multiply CVR a third time. The CVR / Margin-per-order decomposition is shown for attribution only — Margin/order is back-solved as (1+M1/UV)/(1+CVR)−1.';
+      const interp = 'Interpretation: positive means shipping is expected to grow margin; negative means it would shrink it. Magnitudes under ±0.5% are typically within noise on short windows.';
+      funnelFormulaLine = `<div class="row" style="font-size:0.78rem;flex-direction:column;align-items:flex-start;gap:4px"><span class="lbl">Funnel formula</span><span class="muted">${note}</span><span class="muted">${interp}</span></div>`;
+    }
+    const srmChiLine = (srmObj && srmObj.chi_sq !== undefined)
+      ? `<div class="row"><span class="lbl">SRM χ² (in use)</span><span class="muted">${(srmObj.chi_sq||0).toFixed(3)} (p=${fmtP(srmObj.p_value||1)})</span></div>` : '';
+    const srmRawLine = (srmPromoted && srmObj.original)
+      ? `<div class="row"><span class="lbl">SRM χ² (raw)</span><span class="muted">${(srmObj.original.chi_sq||0).toFixed(3)} (p=${fmtP(srmObj.original.p_value||0)})</span></div>` : '';
+    const seoNoteLine = seoStatus
+      ? `<div class="row" style="font-size:0.74rem"><span class="lbl"></span><span class="muted">DiD Impr/Clicks vs L3-matched synthetic peer.</span></div>`
+      : '';
+    const detailsBody = funnelFormulaLine + runwayLine + srmChiLine + srmRawLine + seoNoteLine;
+    const detailsSection = detailsBody ? `
+      <details class="card-details"><summary>Details</summary>${detailsBody}</details>` : '';
+
+    return `<div class="card ${cls}">${headerHtml}${expectedSection}${abSection}${seoSection}${detailsSection}</div>`;
 }
 
 function buildExpTabs() {
@@ -130,19 +701,23 @@ function expBody(name) {
   const sl = slug(name);
   return `
     <div class="tabs" style="border-bottom-color:#cbd5e0">
-      <button class="tab-btn active" data-sub="overview">Overview</button>
-      <button class="tab-btn" data-sub="categories">Per Category</button>
+      ${SHOW_OVERVIEW_TAB ? `<button class="tab-btn active" data-sub="overview">Overview</button>` : ''}
+      <button class="tab-btn${SHOW_OVERVIEW_TAB ? '' : ' active'}" data-sub="ab">AB experiment</button>
       <button class="tab-btn" data-sub="seo">SEO</button>
+      <button class="tab-btn" data-sub="categories">Per Category</button>
       <button class="tab-btn" data-sub="deals">Deals</button>
     </div>
-    <div class="sub-content" data-sub="overview" style="padding-top:18px">
-      <h3 style="margin-bottom:8px">${D.alternate_name||name} — Overview</h3>
+    ${SHOW_OVERVIEW_TAB ? `<div class="sub-content" data-sub="overview" style="padding-top:18px">
+      <div id="overview-${sl}"></div>
+    </div>` : ''}
+    <div class="sub-content" data-sub="ab" style="${SHOW_OVERVIEW_TAB ? 'display:none;' : ''}padding-top:18px">
+      <h3 style="margin-bottom:8px">${D.alternate_name||name} — AB experiment</h3>
       <p class="muted" style="margin-bottom:12px">Window: ${D.start_date} → ${D.end_date}. AB-Filtered metrics shown over time.</p>
+      <div id="rationale-${sl}"></div>
       <div class="chart-grid-2">
         <div><h4 style="font-size:0.95rem;margin-bottom:6px">M1/UV (margin per unique visitor)</h4><div class="chart-wrap"><canvas id="ch-${sl}-m1uv"></canvas></div></div>
         <div><h4 style="font-size:0.95rem;margin-bottom:6px">CVR (orders / UDV)</h4><div class="chart-wrap"><canvas id="ch-${sl}-cvr"></canvas></div></div>
       </div>
-      <div class="bar-grid" style="margin-top:18px" id="kpi-${sl}"></div>
     </div>
     <div class="sub-content" data-sub="categories" style="display:none;padding-top:18px">
       <h3 style="margin-bottom:8px">Per-category heatmap</h3>
@@ -167,46 +742,252 @@ function initExp(name) {
       root.querySelectorAll(':scope > .tabs .tab-btn').forEach(x => x.classList.toggle('active', x === b));
       root.querySelectorAll('.sub-content').forEach(c => c.style.display = (c.dataset.sub === sub ? 'block' : 'none'));
       if (sub === 'overview') renderOverview(name);
+      if (sub === 'ab') renderAB(name);
       if (sub === 'categories') renderCategories(name);
       if (sub === 'seo') renderSeo(name);
       if (sub === 'deals') renderDeals(name);
     };
   });
+  // Build all sub-tabs eagerly so the first click is fast. Overview is the new default
+  // (formerly the global scoreboard); AB experiment is no longer the landing tab.
   renderOverview(name);
-  renderCategories(name);  // build structure even when not active so initial click is fast
+  renderAB(name);
+  renderCategories(name);
   renderSeo(name);
   renderDeals(name);
 }
 
+// Render the evaluator-written narrative pulled from the passthrough .docx. Renders the
+// most actionable sections first (executive summary, what the data shows, action items,
+// final recommendation) and falls back to per-Step body paragraphs (Step 7 practical
+// significance, Step 8 behavioral mechanism, Step 2 overall results) when the curated
+// subsections are absent. Returns '' when no narrative was loaded; caller then falls
+// back to the synthesized rationale.
+function renderEvaluatorNarrative(D) {
+  const n = D.evaluation_narrative || {};
+  if (!n || !Object.keys(n).length) return '';
+  const verdict = (D.ab_filtered_verdict || '').toUpperCase();
+  const tint = (verdict === 'KILL') ? 'background:#fff5f5;border-left-color:var(--red)'
+            : (verdict === 'SHIP') ? 'background:#f0fff4;border-left-color:var(--green)'
+            : 'background:#fffaf0;border-left-color:var(--yellow)';
+
+  const renderItems = (items, opts) => {
+    if (!items || !items.length) return '';
+    const limit = (opts && opts.limit) || items.length;
+    const sliced = items.slice(0, limit);
+    let html = '';
+    let openUl = false;
+    sliced.forEach(it => {
+      if (it.is_bullet) {
+        if (!openUl) { html += '<ul class="rationale-list">'; openUl = true; }
+        html += `<li>${escapeText(it.text)}</li>`;
+      } else {
+        if (openUl) { html += '</ul>'; openUl = false; }
+        html += `<p style="margin:6px 0">${escapeText(it.text)}</p>`;
+      }
+    });
+    if (openUl) html += '</ul>';
+    return html;
+  };
+
+  // Curated sections we surface, in display order. Pick the first available "what
+  // happened" source (named-summary section preferred; fall back to Step body if
+  // the named one is absent).
+  const blocks = [];
+  const push = (title, items, opts) => {
+    if (items && items.length) blocks.push({title, html: renderItems(items, opts)});
+  };
+
+  if (n.executive_summary) push('Executive summary', n.executive_summary, {limit: 4});
+  // "What the data shows" + "What remains uncertain" are evaluator-curated when present.
+  push('What the data shows', n.what_the_data_shows);
+  push('What remains uncertain', n.what_remains_uncertain);
+  // Final recommendation may be empty when the eval splits content into action items.
+  if (n.final_recommendation && n.final_recommendation.length) {
+    push('Final recommendation', n.final_recommendation);
+  }
+  push('Action items', n.action_items);
+
+  // Per-Step fallbacks — only surface when no curated subsection above provided content,
+  // or when the AB doc puts the verdict reasoning inline in Step paragraphs (AI_Summaries
+  // pattern) rather than under named subsections.
+  const havePrimary = blocks.length > 0;
+  if (!havePrimary || !n.what_the_data_shows) {
+    if (n.step_7_practical) push('Practical significance', n.step_7_practical, {limit: 5});
+    if (n.step_8_mechanism) push('Behavioral mechanism', n.step_8_mechanism, {limit: 4});
+    if (n.step_2_overall_results) push('Overall results', n.step_2_overall_results, {limit: 3});
+  }
+
+  if (!blocks.length) return '';
+
+  const body = blocks.map(b =>
+    `<div class="narrative-section"><div class="narrative-h">${escapeText(b.title)}</div>${b.html}</div>`
+  ).join('');
+  return `<div class="rationale" style="${tint}">
+    <div class="rationale-title">Why <strong>${verdict || '?'}</strong>? — from AB evaluation report</div>
+    ${body}
+  </div>`;
+}
+
+function escapeText(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Build a "Why <verdict>?" narrative from the actual metric values + SRM/runway/SEO state.
+// Returns an HTML string (or '' when there's nothing meaningful to say). Used by
+// renderOverview to give human context for the verdict, beyond the raw numbers in the
+// scoreboard. Used as a FALLBACK only — when the evaluator's docx narrative is loaded
+// it takes precedence (see renderEvaluatorNarrative).
+function buildVerdictRationale(D) {
+  const verdict = (D.ab_filtered_verdict || '').toUpperCase();
+  if (!verdict) return '';
+  const om = D.unfiltered_m1uv || D.overall_m1uv || null;
+  const oc = D.unfiltered_cvr  || D.overall_cvr  || null;
+  const m1uvPct = om ? om.mean_delta_pct : null;
+  const m1uvP   = om ? om.p_value : null;
+  const cvrPct  = oc ? oc.mean_delta_pct : null;
+  const cvrP    = oc ? oc.p_value : null;
+  const did = (D.seo && D.seo.did) || {};
+  const seoP = ((D.seo && D.seo.power_analysis) || {}).p_value;
+  const clkPct = (did.did_clicks_pct == null) ? null : did.did_clicks_pct;
+  const impPct = (did.did_impressions_pct == null) ? null : did.did_impressions_pct;
+  const seoVerdict = D.seo && D.seo.status === 'ok' ? D.seo.verdict : null;
+  const srm = D.srm_filtered || {};
+  const srmRemediated = srm.promoted_from === 'remediated';
+  const srmHardFail = srm.verdict && srm.verdict !== 'pass';
+  const runway = D.runway_filtered || {};
+
+  const sigSuffix = (p) => {
+    if (p == null) return '';
+    return p < 0.05 ? ` <span class="sigstar">★</span>` : ` <span class="muted" style="font-weight:400">(n.s., p=${fmtP(p)})</span>`;
+  };
+
+  // Rank candidate metrics by magnitude (signed) so we can call out the dominant signal.
+  const candidates = [];
+  if (m1uvPct != null) candidates.push({label: 'M1/UV', pct: m1uvPct, p: m1uvP});
+  if (cvrPct  != null) candidates.push({label: 'CVR',   pct: cvrPct,  p: cvrP});
+  if (clkPct  != null) candidates.push({label: 'SEO Clicks (DiD)', pct: clkPct, p: seoP});
+  if (impPct  != null) candidates.push({label: 'SEO Impressions (DiD)', pct: impPct, p: seoP});
+
+  const bullets = [];
+
+  // 1) Headline: the metric most responsible for the verdict direction.
+  if (verdict === 'KILL') {
+    const losers = candidates.filter(c => c.pct < 0).slice().sort((a,b) => a.pct - b.pct); // most negative first
+    if (losers.length) {
+      const w = losers[0];
+      bullets.push(`<strong>${w.label} ${fmtPctOf(w.pct)}${sigSuffix(w.p)}</strong> — primary driver of the negative composed funnel.`);
+      losers.slice(1, 3).forEach(c => {
+        bullets.push(`Also negative: ${c.label} ${fmtPctOf(c.pct)}${sigSuffix(c.p)}.`);
+      });
+    } else {
+      bullets.push(`KILL despite no individual metric being clearly negative — check SRM / sample size below.`);
+    }
+  } else if (verdict === 'SHIP') {
+    const winners = candidates.filter(c => c.pct > 0).slice().sort((a,b) => b.pct - a.pct);
+    if (winners.length) {
+      const w = winners[0];
+      bullets.push(`<strong>${w.label} ${fmtPctOf(w.pct)}${sigSuffix(w.p)}</strong> — primary driver of the positive composed funnel.`);
+      winners.slice(1, 3).forEach(c => {
+        bullets.push(`Also positive: ${c.label} ${fmtPctOf(c.pct)}${sigSuffix(c.p)}.`);
+      });
+    }
+  } else {
+    // INCONCLUSIVE / HOLD / EXTEND / PRELIMINARY — explain why we can't call it.
+    const bigSig = candidates.filter(c => c.p != null && c.p < 0.05);
+    if (bigSig.length === 0) {
+      bullets.push(`No metric reached statistical significance (all p ≥ 0.05). The observed deltas are within noise on this sample size.`);
+    } else {
+      bullets.push(`Mixed signal — significant on ${bigSig.map(c => `${c.label} ${fmtPctOf(c.pct)}`).join(', ')}, but the funnel composition isn't decisive.`);
+    }
+  }
+
+  // 2) SEO impact, when independently informative (overall verdict, not already pulled in above).
+  if (seoVerdict && verdict !== 'KILL') {
+    const seoLine = (clkPct != null && impPct != null)
+      ? `SEO verdict <strong>${seoVerdict}</strong>: DiD clicks ${fmtPctOf(clkPct)}, impressions ${fmtPctOf(impPct)}${sigSuffix(seoP)}.`
+      : `SEO verdict <strong>${seoVerdict}</strong>.`;
+    bullets.push(seoLine);
+  }
+
+  // 3) SRM context (hard fail or remediation).
+  if (srmRemediated) {
+    const oP = (srm.original || {}).p_value;
+    bullets.push(`SRM raw bcookie split failed (χ² p=${oP != null ? fmtP(oP) : '<0.001'}); active-visitor remediation passed (χ² p=${fmtP(srm.p_value || 1)}). Headline numbers above use the remediated cohort.`);
+  } else if (srmHardFail) {
+    bullets.push(`<strong>SRM ${srm.verdict}</strong> — assignment imbalance not resolvable by remediation. Decision should be treated as advisory, not authoritative.`);
+  }
+
+  // 4) Runway (only when the verdict isn't already SHIP/KILL).
+  if (runway && !runway.already_significant && verdict !== 'SHIP' && verdict !== 'KILL') {
+    if (runway.infeasible) {
+      bullets.push(`Runway: <strong>infeasible</strong> — ${runway.reason || 'observed effect too small to converge in any reasonable window'}.`);
+    } else if (runway.additional_days != null) {
+      bullets.push(`Runway: needs ~<strong>${runway.additional_days} more days</strong> for p<0.05 (n=${runway.n_current}d → projected ~${runway.n_required}d total).`);
+    }
+  }
+
+  // 5) Sample-size caveat for very short windows.
+  const n = (om && om.n) || (oc && oc.n) || null;
+  if (n != null && n < 7) {
+    bullets.push(`Short sample window (n=${n}d) — confidence in the call is limited until the test has run longer.`);
+  }
+
+  if (!bullets.length) return '';
+
+  // Soft-tinted callout matching the verdict colour family.
+  const tint = (verdict === 'KILL') ? 'background:#fff5f5;border-left-color:var(--red)'
+            : (verdict === 'SHIP') ? 'background:#f0fff4;border-left-color:var(--green)'
+            : 'background:#fffaf0;border-left-color:var(--yellow)';
+  return `<div class="rationale" style="${tint}">
+    <div class="rationale-title">Why <strong>${verdict}</strong>?</div>
+    <ul class="rationale-list">${bullets.map(b => `<li>${b}</li>`).join('')}</ul>
+  </div>`;
+}
+
+// renderOverview now renders the single-experiment scorecard into the new Overview
+// sub-tab (was a global "Scoreboard" section above the experiment tabs; the Executive
+// Summary section above replaces that scan-level role). The per-experiment AB charts +
+// rationale moved to the new "AB experiment" sub-tab and are owned by renderAB().
 function renderOverview(name) {
   const D = ROOT.experiments[name];
   const sl = slug(name);
+  const root = document.getElementById(`overview-${sl}`);
+  if (!root) return;
+  root.innerHTML = `<div class="scoreboard">${buildScorecardHtml(name, D)}</div>`;
+}
+
+function renderAB(name) {
+  const D = ROOT.experiments[name];
+  const sl = slug(name);
   const daily = D.overall_daily || [];
-  if (daily.length && daily[0].m1uv_ctrl !== undefined) {
-    lineChart(`ch-${sl}-m1uv`, daily, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
-    lineChart(`ch-${sl}-cvr`,  daily, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
+  // Double-rAF for the same reason as initCatCharts — when the user switches to a
+  // not-yet-rendered experiment outer tab, the canvas is briefly 0×0 until layout runs.
+  const drawCharts = () => {
+    if (daily.length && daily[0].m1uv_ctrl !== undefined) {
+      lineChart(`ch-${sl}-m1uv`, daily, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-cvr`,  daily, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
+    } else {
+      lineChart(`ch-${sl}-m1uv`, D.raw_filtered_daily, 'ctrl', 'treat', 'M1/UV ($)');
+    }
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(drawCharts));
   } else {
-    // fall back to legacy filtered.daily ({d, ctrl, treat})
-    lineChart(`ch-${sl}-m1uv`, D.raw_filtered_daily, 'ctrl', 'treat', 'M1/UV ($)');
+    setTimeout(drawCharts, 32);
   }
-  const kpi = document.getElementById(`kpi-${sl}`);
-  if (!kpi) return;
-  let html = '';
-  const om = D.overall_m1uv, oc = D.overall_cvr, srm = D.srm_filtered || {};
-  if (om) {
-    const cls = (om.mean_delta_pct||0) > 0.1 ? 'win' : (om.mean_delta_pct||0) < -0.1 ? 'lose' : '';
-    html += `<div class="kpi ${cls}"><div class="label">M1/UV — daily mean Δ</div><div class="value">${fmtPctOf(om.mean_delta_pct)}</div><div class="delta">absolute ${fmtMoney2(om.mean_delta)} · p=${fmtP(om.p_value)} · n=${om.n}d</div></div>`;
+  const rationale = document.getElementById(`rationale-${sl}`);
+  if (rationale) {
+    // Prefer the evaluator's hand-written narrative (parsed from passthrough .docx) when
+    // available; fall back to the renderer's synthesized rationale otherwise.
+    const evalText = renderEvaluatorNarrative(D);
+    rationale.innerHTML = evalText || buildVerdictRationale(D);
   }
-  if (oc) {
-    const cls = (oc.mean_delta_pct||0) > 0.1 ? 'win' : (oc.mean_delta_pct||0) < -0.1 ? 'lose' : '';
-    html += `<div class="kpi ${cls}"><div class="label">CVR — daily mean Δ</div><div class="value">${fmtPctOf(oc.mean_delta_pct)}</div><div class="delta">absolute ${(oc.mean_delta>=0?'+':'')+((oc.mean_delta||0)*100).toFixed(3)}pp · p=${fmtP(oc.p_value)} · n=${oc.n}d</div></div>`;
-  }
-  if (srm.verdict) {
-    const cls = srm.verdict === 'pass' ? 'win' : 'lose';
-    const obs = srm.observed || {};
-    html += `<div class="kpi ${cls}"><div class="label">SRM check</div><div class="value">${(srm.verdict||'').toUpperCase()}</div><div class="delta">χ²=${(srm.chi_sq||0).toFixed(3)} · p=${fmtP(srm.p_value||1)} · ctrl ${(obs.control||0).toLocaleString()} vs treat ${(obs.treatment||0).toLocaleString()}</div></div>`;
-  }
-  kpi.innerHTML = html;
+  // Headline KPI cards (M1/UV, CVR, SRM, runway) are intentionally NOT rendered here —
+  // they were duplicating the scorecard / scoreboard sections AND used a different cohort
+  // source (legacy overall_m1uv reads from raw.filtered.daily as fallback, while the
+  // scorecard uses unfiltered raw.overall.daily). The mismatch was confusing; the
+  // scorecard is the single canonical home for those numbers now.
 }
 
 function renderCategories(name) {
@@ -214,35 +995,140 @@ function renderCategories(name) {
   const sl = slug(name);
   const root = document.getElementById(`heatmap-${sl}`);
   if (!root) return;
-  const cats = D.categories || [];
+  let cats = D.categories || [];
   if (!cats.length) {
     root.innerHTML = '<p class="muted" style="padding:14px">No per-category data available.</p>';
     return;
   }
+  // Sort categories by total M1 (control + treatment, summed across daily rows) descending —
+  // heaviest categories first. Categories with no daily data fall to the bottom in original order.
+  // Sort key uses per_category[cat].daily; per_category_overall is the fallback when filtered is empty.
+  const _catWeight = (cat) => {
+    const daily = ((D.per_category||{})[cat] || {}).daily
+              || ((D.per_category_overall||{})[cat] || {}).daily
+              || [];
+    let total = 0;
+    for (const r of daily) {
+      total += (+(r.m1_ctrl) || 0) + (+(r.m1_treat) || 0);
+    }
+    return total;
+  };
+  cats = cats.slice().sort((a, b) => _catWeight(b) - _catWeight(a));
   const cell = (s) => {
     if (!s || s.p_value === undefined) return `<div class="hm-cell muted">n/a</div>`;
     const sig = s.p_value < 0.05 ? ' hm-sig' : '';
     return `<div class="hm-cell${sig}" style="background:${colorFor(s.mean_delta_pct)}"><div class="pct">${fmtPctOf(s.mean_delta_pct)}</div><span class="pval">p=${fmtP(s.p_value)}</span></div>`;
   };
+  const seoPpCell = (val, n_pre, n_post) => {
+    if (val == null || isNaN(val)) return `<div class="hm-cell muted">n/a</div>`;
+    return `<div class="hm-cell" style="background:${seoColor(val)}"><div class="pct">${fmtPp(val)}</div><span class="pval">${n_post||0} URLs</span></div>`;
+  };
+  // Determine M1 ratio denominator from the first per-cat object that carries the
+  // marker (set by run-ab-evaluation: 'uv' for split experiments, 'udv' for L2-derived).
+  // Default to 'uv' for backward compatibility with older AB JSONs.
+  let m1Denom = 'uv';
+  for (const c of cats) {
+    const pc = (D.per_category || {})[c];
+    if (pc && pc.denominator) { m1Denom = String(pc.denominator).toLowerCase(); break; }
+  }
+  const m1RatioLabel = m1Denom === 'udv' ? 'M1/UDV' : 'M1/UV';
+  const denomLabel   = m1Denom.toUpperCase();
+  // Per-row deal count: lookup `D.deals_per_l2` honoring AB-side aliases.
+  const dealsPerL2 = D.deals_per_l2 || {};
+  const dealsPerL2Lower = {};
+  Object.keys(dealsPerL2).forEach(k => { dealsPerL2Lower[k.trim().toLowerCase()] = dealsPerL2[k]; });
+  const dealCountFor = (cat) => {
+    for (const c of _l2Candidates(cat)) {
+      if (dealsPerL2Lower[c] != null) return dealsPerL2Lower[c];
+    }
+    return null;
+  };
+  // Aggregate-totals helper for the Control / Treatment scale cells (per cat).
+  // Sums daily totals across the experiment window — this is the canonical aggregate-ratio
+  // (SUM(num)/SUM(den)), not a daily mean. For L2-derived rows, uv_* daily fields are
+  // synthesized from udv_* by run-ab-evaluation, so the same code path produces M1/UDV.
+  const aggTotals = (daily) => {
+    let m1c=0, m1t=0, dc=0, dt=0, uc=0, ut=0, oc_=0, ot_=0;
+    for (const r of (daily || [])) {
+      m1c += +(r.m1_ctrl)||0;   m1t += +(r.m1_treat)||0;
+      dc  += +(r.uv_ctrl)||0;   dt  += +(r.uv_treat)||0;
+      uc  += +(r.udv_ctrl)||0;  ut  += +(r.udv_treat)||0;
+      oc_ += +(r.orders_ctrl)||0; ot_ += +(r.orders_treat)||0;
+    }
+    return { m1c, m1t, dc, dt, uc, ut, oc_, ot_ };
+  };
+  const compactNum = (v) => {
+    if (v == null || isNaN(v)) return 'n/a';
+    const a = Math.abs(v);
+    if (a >= 1e9) return (v/1e9).toFixed(2)+'B';
+    if (a >= 1e6) return (v/1e6).toFixed(2)+'M';
+    if (a >= 1e3) return (v/1e3).toFixed(1)+'k';
+    return Math.round(v).toLocaleString();
+  };
+  const compactMoney = (v) => v == null || isNaN(v) ? 'n/a' : '$' + compactNum(v);
+  const scaleCell = (m1, denom, udv, orders) => {
+    // denom = uv (split) or udv (L2-view); udv is always the CVR denominator.
+    if ((m1==null && denom==null && udv==null && orders==null) || (m1===0 && denom===0 && udv===0 && orders===0)) {
+      return `<div class="hm-cell muted" style="text-align:left;font-size:0.72rem;line-height:1.4;padding:8px">no daily data</div>`;
+    }
+    const m1Per = (denom && denom > 0) ? (m1/denom) : null;
+    const cvr   = (udv && udv > 0) ? (orders/udv) : null;
+    return `<div class="hm-cell" style="text-align:left;font-size:0.72rem;line-height:1.45;padding:8px;background:#fafbfc">
+      <div>M1: <strong>${compactMoney(m1)}</strong></div>
+      <div>${denomLabel}: <strong>${compactNum(denom)}</strong></div>
+      <div>${m1RatioLabel}: <strong>${m1Per==null?'n/a':'$'+m1Per.toFixed(3)}</strong></div>
+      <div>CVR: <strong>${cvr==null?'n/a':(cvr*100).toFixed(2)+'%'}</strong></div>
+    </div>`;
+  };
+  // Heatmap grid: row label + 2 scale cells (Totals: Control, Treatment) + 3 SEO DiD cells +
+  // 2 AB Overall cells + 2 AB Filtered cells = 10 cols. Order: Totals → SEO → AB Overall → AB Filtered.
+  root.style.gridTemplateColumns = '200px 1.4fr 1.4fr repeat(7, 1fr)';
   let html = `
     <div class="hm-cell hm-head"></div>
-    <div class="hm-cell hm-head" style="grid-column:span 2">AB-Filtered (deal-scoped)</div>
+    <div class="hm-cell hm-head" style="grid-column:span 2">Totals</div>
+    <div class="hm-cell hm-head" style="grid-column:span 3">SEO DiD (variant vs same-category All Groupon)</div>
     <div class="hm-cell hm-head" style="grid-column:span 2">AB-Overall (population-wide)</div>
+    <div class="hm-cell hm-head" style="grid-column:span 2">AB-Filtered (deal-scoped)</div>
     <div class="hm-cell hm-head"></div>
-    <div class="hm-cell hm-head">M1/UV %Δ</div>
+    <div class="hm-cell hm-head">Control</div>
+    <div class="hm-cell hm-head">Treatment</div>
+    <div class="hm-cell hm-head">DiD Impr pp</div>
+    <div class="hm-cell hm-head">DiD Clicks pp</div>
+    <div class="hm-cell hm-head">DiD CTR pp</div>
+    <div class="hm-cell hm-head">${m1RatioLabel} %Δ</div>
     <div class="hm-cell hm-head">CVR %Δ</div>
-    <div class="hm-cell hm-head">M1/UV %Δ</div>
+    <div class="hm-cell hm-head">${m1RatioLabel} %Δ</div>
     <div class="hm-cell hm-head">CVR %Δ</div>`;
   cats.forEach(cat => {
-    const pf = D.per_category[cat] || {m1uv:{},cvr:{}};
+    const pf = D.per_category[cat] || {m1uv:{},cvr:{},daily:[]};
     const po = (D.per_category_overall||{})[cat] || {m1uv:{},cvr:{}};
-    html += `<div class="hm-cell hm-row-label">${cat}</div>`;
-    html += cell(pf.m1uv);
-    html += cell(pf.cvr);
+    const variantRow = _seoL2VariantRow(D.seo, cat);
+    const didImpPp   = variantRow ? variantRow.did_impr_pp   : null;
+    const didClkPp   = variantRow ? variantRow.did_clicks_pp : null;
+    const didCtrPp   = _seoL2CtrDidPp(D.seo, cat);
+    const urlCount   = variantRow ? (variantRow.url_count || 0) : 0;
+    const t = aggTotals(pf.daily);
+    const dealCount = dealCountFor(cat);
+    const dealsLine = dealCount == null ? '' : `<div class="muted" style="font-size:0.72rem;font-weight:400;margin-top:2px">${Number(dealCount).toLocaleString()} deal${dealCount===1?'':'s'}</div>`;
+    html += `<div class="hm-cell hm-row-label">${cat}${dealsLine}</div>`;
+    // Order: Totals (Control, Treatment) → SEO DiD (Impr, Clicks, CTR) → AB Overall (M1/UV, CVR) → AB Filtered (M1/UV, CVR).
+    html += scaleCell(t.m1c, t.dc, t.uc, t.oc_);
+    html += scaleCell(t.m1t, t.dt, t.ut, t.ot_);
+    html += seoPpCell(didImpPp, urlCount, urlCount);
+    html += seoPpCell(didClkPp, urlCount, urlCount);
+    html += seoPpCell(didCtrPp, urlCount, urlCount);
     html += cell(po.m1uv);
     html += cell(po.cvr);
+    html += cell(pf.m1uv);
+    html += cell(pf.cvr);
   });
   root.innerHTML = html;
+  // Benchmark-spread caveat for per-L2 SEO DiD.
+  const note = document.createElement('p');
+  note.className = 'muted';
+  note.style.cssText = 'margin-top:8px;font-size:0.78rem';
+  note.textContent = 'Per-category SEO DiD here is variant Δ% minus All-Groupon-in-same-category Δ% (benchmark spread). The headline DiD on the scoreboard uses an L3-matched synthetic-control peer; the two answer different questions.';
+  root.parentElement && root.parentElement.appendChild(note);
 
   // sub-tabs
   const subRoot = document.getElementById(`cat-subtabs-${sl}`);
@@ -250,6 +1136,7 @@ function renderCategories(name) {
   subRoot.innerHTML = '';
   subContent.innerHTML = '';
   cats.forEach((cat, i) => {
+    const cs = slug(cat);
     const btn = document.createElement('button');
     btn.className = 'cat-subtab-btn' + (i === 0 ? ' active' : '');
     btn.textContent = cat;
@@ -263,40 +1150,62 @@ function renderCategories(name) {
     const div = document.createElement('div');
     div.className = 'cat-subtab-content' + (i === 0 ? ' active' : '');
     div.dataset.cat = cat;
-    div.innerHTML = `
+    const hasAbF = ((D.per_category||{})[cat] || {}).daily && (D.per_category[cat].daily.length > 0);
+    const hasAbO = ((D.per_category_overall||{})[cat] || {}).daily && (D.per_category_overall[cat].daily.length > 0);
+    // Canvas IDs use slug(cat) — not the row index — so chart-init lookups still work
+    // when the category list is re-ordered (e.g. sorted by total M1).
+    const abFBlock = hasAbF ? `
       <h4 style="font-size:0.92rem;margin-bottom:6px;color:#4a5568">AB-Filtered (deal-scoped)</h4>
       <div class="chart-grid-2">
-        <div><div class="chart-wrap"><canvas id="ch-${sl}-${i}-m1uv-f"></canvas></div></div>
-        <div><div class="chart-wrap"><canvas id="ch-${sl}-${i}-cvr-f"></canvas></div></div>
-      </div>
+        <div><div class="chart-wrap"><canvas id="ch-${sl}-${cs}-m1uv-f"></canvas></div></div>
+        <div><div class="chart-wrap"><canvas id="ch-${sl}-${cs}-cvr-f"></canvas></div></div>
+      </div>` : '';
+    const abOBlock = hasAbO ? `
       <h4 style="font-size:0.92rem;margin-top:14px;margin-bottom:6px;color:#4a5568">AB-Overall (population-wide)</h4>
       <div class="chart-grid-2">
-        <div><div class="chart-wrap"><canvas id="ch-${sl}-${i}-m1uv-o"></canvas></div></div>
-        <div><div class="chart-wrap"><canvas id="ch-${sl}-${i}-cvr-o"></canvas></div></div>
-      </div>`;
+        <div><div class="chart-wrap"><canvas id="ch-${sl}-${cs}-m1uv-o"></canvas></div></div>
+        <div><div class="chart-wrap"><canvas id="ch-${sl}-${cs}-cvr-o"></canvas></div></div>
+      </div>` : '';
+    const noAbNotice = (!hasAbF && !hasAbO) ? `<p class="muted" style="font-size:0.85rem;margin-bottom:8px">AB per-category split is off for this experiment (<code>use_deal_category_split=FALSE</code>) — showing SEO L2 view only.</p>` : '';
+    const seoBlock = renderSeoCatBlock(cat, null);
+    div.innerHTML = `${noAbNotice}${abFBlock}${abOBlock}${seoBlock}`;
     subContent.appendChild(div);
   });
   if (cats.length) initCatCharts(name, cats[0]);
 }
 
+function renderSeoCatBlock(cat, _unused) {
+  // Per-L2 SEO detail moved into the embedded upstream report (SEO tab).
+  return `<p class="muted" style="font-size:0.85rem;margin-top:14px">Detailed per-L2 SEO winners / losers / charts for <strong>${cat}</strong> are inside the embedded SEO report — see the <em>SEO</em> tab.</p>`;
+}
+
 function initCatCharts(name, cat) {
   const D = ROOT.experiments[name];
   const sl = slug(name);
-  const cats = D.categories || [];
-  const idx = cats.indexOf(cat);
-  if (idx < 0) return;
+  const cs = slug(cat);
   const filt = ((D.per_category||{})[cat] || {}).daily || [];
   const ovr = ((D.per_category_overall||{})[cat] || {}).daily || [];
-  setTimeout(() => {
+  // Double-rAF guarantees the browser has performed layout on the freshly-shown
+  // parent tab before Chart.js measures the canvas. Single setTimeout(0) was firing
+  // before the display:none → display:block transition completed layout, so charts
+  // saw 0×0 dims and rendered empty. With double-rAF the first frame triggers
+  // layout, the second frame fires after layout completes — canvas now has its
+  // 280px height, lineChart measures correctly.
+  const draw = () => {
     if (filt.length) {
-      lineChart(`ch-${sl}-${idx}-m1uv-f`, filt, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
-      lineChart(`ch-${sl}-${idx}-cvr-f`,  filt, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
+      lineChart(`ch-${sl}-${cs}-m1uv-f`, filt, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-${cs}-cvr-f`,  filt, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
     }
     if (ovr.length) {
-      lineChart(`ch-${sl}-${idx}-m1uv-o`, ovr, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
-      lineChart(`ch-${sl}-${idx}-cvr-o`,  ovr, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
+      lineChart(`ch-${sl}-${cs}-m1uv-o`, ovr, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-${cs}-cvr-o`,  ovr, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
     }
-  }, 0);
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => requestAnimationFrame(draw));
+  } else {
+    setTimeout(draw, 32);
+  }
 }
 
 function ppCell(v) {
@@ -311,177 +1220,50 @@ function renderSeo(name) {
   const root = document.getElementById(`seo-${sl}`);
   if (!root) return;
   const s = D.seo;
-  if (!s || s.status !== 'ok' || !s.pre_post) {
-    root.innerHTML = `<div class="skipped">SEO eval: ${s?.status || 'n/a'}${s?.reason ? ' — ' + s.reason : ''}</div>`;
+  if (!s || s.status !== 'ok') {
+    root.innerHTML = `<div class="skipped">SEO eval: ${(s && s.status) || 'n/a'}${(s && s.reason) ? ' — ' + s.reason : ''}</div>`;
     return;
   }
-  const pp = s.pre_post;
-  const ov = pp.overall || {};
-  const impPct = ov.impressions_pct_total ?? 0;
-  const clkPct = ov.clicks_pct_total ?? 0;
-  const did = s.did_overall || {};
-  const dV = did.variant || {}, dC = did.control || {}, dD = did.did || {};
-
-  let html = `
-    <div class="bar-grid" style="margin-bottom:14px">
-      <div class="kpi"><div class="label">Signal level</div><div class="value">${s.signal_level || '?'}</div><div class="delta">post days: ${s.post_days || pp.effective_post_days} (3-day GSC lag)</div></div>
-      <div class="kpi"><div class="label">Pre window</div><div class="value">${pp.pre_start} → ${pp.pre_end}</div><div class="delta">${s.pre_days || 28} days</div></div>
-      <div class="kpi"><div class="label">Post window</div><div class="value">${pp.post_start} → ${pp.post_end}</div><div class="delta">${s.post_days || pp.effective_post_days} days</div></div>
-      <div class="kpi"><div class="label">URLs with GSC data</div><div class="value">${(ov.urls_with_data||0).toLocaleString()}</div><div class="delta">of ${(pp.total_urls_input||0).toLocaleString()} variant input</div></div>
-    </div>`;
-
-  if (Object.keys(did).length) {
-    html += `
-      <h3>Overall DiD (variant vs control, day-normalized)</h3>
-      <table style="margin-bottom:18px">
-        <thead><tr>
-          <th class="label">Group</th><th>URLs (pre)</th><th>URLs (post)</th>
-          <th>Impr/day pre→post (%)</th><th>Clicks/day pre→post (%)</th><th>CTR pre→post (Δpp)</th>
-        </tr></thead><tbody>
-          <tr><td>Variant</td><td>${(dV.pre_url_count||0).toLocaleString()}</td><td>${(dV.post_url_count||0).toLocaleString()}</td>
-            <td>${fmtPctOf(dV.imp_pct_change ?? 0)}</td><td>${fmtPctOf(dV.clk_pct_change ?? 0)}</td><td>${fmtPp(dV.ctr_delta_pp ?? 0)}</td></tr>
-          <tr><td>Control</td><td>${(dC.pre_url_count||0).toLocaleString()}</td><td>${(dC.post_url_count||0).toLocaleString()}</td>
-            <td>${fmtPctOf(dC.imp_pct_change ?? 0)}</td><td>${fmtPctOf(dC.clk_pct_change ?? 0)}</td><td>${fmtPp(dC.ctr_delta_pp ?? 0)}</td></tr>
-          <tr style="background:#edf2f7;font-weight:700">
-            <td>DiD (variant − control)</td><td></td><td></td>
-            ${ppCell(dD.imp_pp)}${ppCell(dD.clk_pp)}${ppCell(dD.ctr_pp)}
-          </tr>
-        </tbody>
-      </table>`;
-  } else {
-    html += `<div class="skipped" style="margin-bottom:18px"><strong>DiD not computed.</strong> No control URL set was supplied to seo-impact-analyzer; the pipeline can't compute Difference-in-Differences without a parallel control group. Add a <code>resolve-control-urls</code> step or pass a control set to fix.</div>`;
+  const b64 = s.upstream_html_b64;
+  if (!b64) {
+    root.innerHTML = `<div class="skipped">SEO upstream HTML missing from <code>seo_${sl}.json</code> — re-run <code>run-seo-evaluation</code> against upstream commit 3100dc8 or later.</div>`;
+    return;
   }
-
-  // DiD per L2
-  const order = s.l2_order || [];
-  const perL2 = s.did_per_l2 || {};
-  if (order.length && Object.keys(perL2).length) {
-    html += `<h3>DiD by L2 category</h3>
-      <table>
-        <thead><tr><th class="label">L2 Category</th><th>Variant URLs (post)</th><th>Control URLs (post)</th>
-          <th>Impressions DiD</th><th>Clicks DiD</th><th>CTR DiD</th></tr></thead><tbody>`;
-    order.forEach(l2 => {
-      const x = perL2[l2]; if (!x) return;
-      const v = x.variant||{}, c = x.control||{}, d = x.did||{};
-      const impColor = (d.imp_pp ?? null) === null ? 'transparent' : seoColor(d.imp_pp);
-      const clkColor = (d.clk_pp ?? null) === null ? 'transparent' : seoColor(d.clk_pp);
-      const ctrColor = seoColor(d.ctr_pp || 0);
-      html += `<tr>
-        <td>${l2}</td>
-        <td>${(v.post_url_count||0).toLocaleString()}</td>
-        <td>${(c.post_url_count||0).toLocaleString()}</td>
-        <td style="background:${impColor}">${d.imp_pp == null ? 'n/a' : fmtPp(d.imp_pp)}</td>
-        <td style="background:${clkColor}">${d.clk_pp == null ? 'n/a' : fmtPp(d.clk_pp)}</td>
-        <td style="background:${ctrColor}">${fmtPp(d.ctr_pp || 0)}</td>
-      </tr>`;
-    });
-    html += `</tbody></table>`;
+  // Decode base64 to string. Use TextDecoder for non-ASCII safety.
+  let html;
+  try {
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    html = new TextDecoder('utf-8').decode(bytes);
+  } catch (err) {
+    root.innerHTML = `<div class="skipped">SEO upstream HTML failed to decode: ${err && err.message ? err.message : err}</div>`;
+    return;
   }
-
-  // Variant-only raw pre/post
-  html += `
-    <h3 style="margin-top:24px">Variant-only pre/post (raw, full URL set incl. unmapped L2)</h3>
-    <p class="muted" style="margin-bottom:8px">Reference numbers from the SEO subagent. Raw % deltas are inflated by post-window asymmetry; the DiD table above is the corrected view.</p>
-    <div class="chart-grid-2">
-      <div><h4 style="font-size:0.95rem;margin-bottom:6px">Impressions (pre vs post)</h4><div class="chart-wrap"><canvas id="ch-${sl}-seo-imp"></canvas></div></div>
-      <div><h4 style="font-size:0.95rem;margin-bottom:6px">Clicks (pre vs post)</h4><div class="chart-wrap"><canvas id="ch-${sl}-seo-clk"></canvas></div></div>
-    </div>
-    <div class="bar-grid" style="margin-top:14px">
-      <div class="kpi ${impPct >= 0 ? 'win':'lose'}"><div class="label">Variant-only Impressions Δ (raw)</div><div class="value">${fmtPctOf(impPct)}</div><div class="delta">${(ov.pre_impressions_total||0).toLocaleString()} → ${(ov.post_impressions_total||0).toLocaleString()}</div></div>
-      <div class="kpi ${clkPct >= 0 ? 'win':'lose'}"><div class="label">Variant-only Clicks Δ (raw)</div><div class="value">${fmtPctOf(clkPct)}</div><div class="delta">${(ov.pre_clicks_total||0).toLocaleString()} → ${(ov.post_clicks_total||0).toLocaleString()}</div></div>
-    </div>`;
-
-  // L2 winners/losers from per_url top-15
-  const topk = s.l2_topk || {};
-  const topkOrder = (s.l2_order || []).filter(l2 => topk[l2]);
-  if (topkOrder.length) {
-    html += `
-      <h3 style="margin-top:24px">Per-L2 top 15 winners + losers (by clicks delta)</h3>
-      <p class="muted" style="margin-bottom:8px">From <code>per_url</code> output of seo-impact-analyzer (variant-side, top 15 per L2).</p>
-      <div class="cat-subtabs" id="seo-l2-subtabs-${sl}"></div>
-      <div id="seo-l2-content-${sl}"></div>`;
+  // Sandboxed srcdoc iframe gives the upstream report its own document context —
+  // no Chart.js double-init, no CSS / DOM-id collisions across experiments, no
+  // cross-frame script access. allow-same-origin is required for upstream's
+  // JSON-from-script tag pattern; allow-scripts is required so its Chart.js
+  // and tab-switching logic actually run.
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts');
+  iframe.setAttribute('srcdoc', html);
+  iframe.style.cssText = 'width:100%;height:90vh;border:0;background:#fff;';
+  iframe.title = `Upstream SEO report — ${name}`;
+  root.innerHTML = '';
+  root.appendChild(iframe);
+  // Caveats banner above the iframe so they're visible without scrolling into the upstream report.
+  const caveats = (s.caveats || []).filter(Boolean);
+  if (caveats.length) {
+    const banner = document.createElement('div');
+    banner.style.cssText = 'background:#fefcbf;padding:10px 14px;border-radius:6px;margin-bottom:10px;font-size:0.85rem';
+    banner.innerHTML = '<strong>SEO caveats:</strong><ul style="margin:4px 0 0 18px">' +
+      caveats.map(c => `<li>${typeof c === 'string' ? c : (c.message || JSON.stringify(c))}</li>`).join('') +
+      '</ul>';
+    root.insertBefore(banner, iframe);
   }
-
-  html += `<p class="muted" style="margin-top:18px">Full SEO passthrough report: <code>${s.passthrough_html||'n/a'}</code></p>`;
-  root.innerHTML = html;
-
-  setTimeout(() => {
-    const barOpts = { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}} };
-    const cImp = document.getElementById(`ch-${sl}-seo-imp`);
-    if (cImp) {
-      if (charts[`ch-${sl}-seo-imp`]) charts[`ch-${sl}-seo-imp`].destroy();
-      charts[`ch-${sl}-seo-imp`] = new Chart(cImp, {
-        type:'bar',
-        data:{ labels:['Pre','Post'], datasets:[{ data:[ov.pre_impressions_total||0, ov.post_impressions_total||0], backgroundColor:['#4A90D9','#E8734A'] }] },
-        options: barOpts
-      });
-    }
-    const cClk = document.getElementById(`ch-${sl}-seo-clk`);
-    if (cClk) {
-      if (charts[`ch-${sl}-seo-clk`]) charts[`ch-${sl}-seo-clk`].destroy();
-      charts[`ch-${sl}-seo-clk`] = new Chart(cClk, {
-        type:'bar',
-        data:{ labels:['Pre','Post'], datasets:[{ data:[ov.pre_clicks_total||0, ov.post_clicks_total||0], backgroundColor:['#4A90D9','#E8734A'] }] },
-        options: barOpts
-      });
-    }
-    if (topkOrder.length) buildSeoL2Subtabs(name);
-  }, 0);
 }
 
-function buildSeoL2Subtabs(name) {
-  const D = ROOT.experiments[name];
-  const sl = slug(name);
-  const root = document.getElementById(`seo-l2-subtabs-${sl}`);
-  const content = document.getElementById(`seo-l2-content-${sl}`);
-  if (!root || !content) return;
-  const topk = D.seo.l2_topk || {};
-  const order = (D.seo.l2_order || []).filter(l2 => topk[l2]);
-  root.innerHTML = ''; content.innerHTML = '';
-  order.forEach((l2, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'cat-subtab-btn' + (i === 0 ? ' active' : '');
-    btn.textContent = `${l2} (${topk[l2].n_total})`;
-    btn.dataset.l2 = l2;
-    btn.onclick = () => {
-      root.querySelectorAll('.cat-subtab-btn').forEach(b => b.classList.toggle('active', b.dataset.l2 === l2));
-      content.querySelectorAll('.cat-subtab-content').forEach(c => c.classList.toggle('active', c.dataset.l2 === l2));
-    };
-    root.appendChild(btn);
-    const div = document.createElement('div');
-    div.className = 'cat-subtab-content' + (i === 0 ? ' active' : '');
-    div.dataset.l2 = l2;
-    const tk = topk[l2];
-    const renderRow = (r) => {
-      const slug2 = (r.url || '').split('/').pop();
-      const cd = r.clk_delta || 0, id_ = r.imp_delta || 0;
-      const cls = cd >= 0 ? '#22543d' : '#742a2a';
-      const cIcls = id_ >= 0 ? '#22543d' : '#742a2a';
-      const flags = [];
-      if (r.low_confidence) flags.push('<span class="badge badge-prelim" title="low confidence">low conf</span>');
-      if (r.ctr_significant) flags.push('<span class="badge badge-pass" title="CTR sig">CTR sig</span>');
-      return `<tr>
-        <td><a href="${r.url}" target="_blank" rel="noopener">${slug2.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</a> ${flags.join(' ')}</td>
-        <td>${(r.pre_imp||0).toLocaleString()} → ${(r.post_imp||0).toLocaleString()}</td>
-        <td style="color:${cIcls}"><strong>${(id_>=0?'+':'')+id_.toLocaleString()}</strong></td>
-        <td>${(r.pre_clk||0).toLocaleString()} → ${(r.post_clk||0).toLocaleString()}</td>
-        <td style="color:${cls}"><strong>${(cd>=0?'+':'')+cd.toLocaleString()}</strong></td>
-        <td>${r.pre_pos == null ? 'n/a' : Number(r.pre_pos).toFixed(1)} → ${r.post_pos == null ? 'n/a' : Number(r.post_pos).toFixed(1)}</td>
-      </tr>`;
-    };
-    const headTr = `<thead><tr>
-      <th class="label">URL</th><th>Impressions pre→post</th><th>Δ Impr</th>
-      <th>Clicks pre→post</th><th>Δ Clicks</th><th>Avg pos pre→post</th>
-    </tr></thead>`;
-    div.innerHTML = `
-      <p class="muted" style="margin-bottom:6px">${l2}: <strong>${tk.n_total.toLocaleString()}</strong> URLs total in per_url; <strong>${tk.n_with_change.toLocaleString()}</strong> with non-zero clicks delta.</p>
-      <h4 style="margin:12px 0 6px;font-size:0.95rem;color:#22543d">Top ${tk.winners.length} winners (clicks gained)</h4>
-      <table>${headTr}<tbody>${tk.winners.map(renderRow).join('')}</tbody></table>
-      <h4 style="margin:18px 0 6px;font-size:0.95rem;color:#742a2a">Top ${tk.losers.length} losers (clicks lost)</h4>
-      <table>${headTr}<tbody>${tk.losers.map(renderRow).join('')}</tbody></table>`;
-    content.appendChild(div);
-  });
-}
 
 function renderDeals(name) {
   const D = ROOT.experiments[name];
@@ -508,27 +1290,11 @@ function renderDeals(name) {
   };
   let html = `<h3>Top Winners (by m1 delta)</h3><table>${renderTable(d.top_winners)}</table>`;
   html += `<h3 style="margin-top:24px">Top Losers (by m1 delta)</h3><table>${renderTable(d.top_losers)}</table>`;
-  if (d.by_category && d.by_category.length) {
-    html += `<h3 style="margin-top:24px">By Category (deal-level)</h3><table><thead><tr><th class="label">Category</th><th>UDV ctrl</th><th>UDV treat</th><th>CVR Δ (pp)</th><th>m1 Δ</th></tr></thead><tbody>`;
-    d.by_category.forEach(r => {
-      const cls = (r.m1_delta||0)>=0 ? '#22543d' : '#742a2a';
-      html += `<tr><td>${r.category||''}</td><td>${(r.udv_ctrl||0).toLocaleString()}</td><td>${(r.udv_treat||0).toLocaleString()}</td><td>${((r.cvr_delta||0)*100).toFixed(3)}pp</td><td style="color:${cls}"><strong>${fmtMoney(r.m1_delta||0)}</strong></td></tr>`;
-    });
-    html += `</tbody></table>`;
-  }
-  if (d.by_booking_platform && d.by_booking_platform.length) {
-    html += `<h3 style="margin-top:24px">By Booking Platform</h3><table><thead><tr><th class="label">Platform</th><th>Deal count</th><th>UDV</th><th>m1 Δ</th></tr></thead><tbody>`;
-    d.by_booking_platform.forEach(r => {
-      const cls = (r.m1_delta||0)>=0 ? '#22543d' : '#742a2a';
-      html += `<tr><td>${r.booking_platform||'(null)'}</td><td>${(r.deal_count||0).toLocaleString()}</td><td>${(r.udv||0).toLocaleString()}</td><td style="color:${cls}"><strong>${fmtMoney(r.m1_delta||0)}</strong></td></tr>`;
-    });
-    html += `</tbody></table>`;
-  }
   root.innerHTML = html;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   header();
-  scoreboard();
+  renderExecSummary();
   buildExpTabs();
 });

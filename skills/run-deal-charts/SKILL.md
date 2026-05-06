@@ -7,23 +7,36 @@ description: Compute AI-summary-style deal-level charts (top winners/losers, by 
 
 ## Inputs
 - `alternate_name`, `start_date`, `end_date`: required
+- `ctrl_name`: optional override for the control variant name. If omitted, query the experiment data once and apply the canonical convention (see below) to pick it.
 - `out_path`: where to write deal_<alt_name>.json
+
+## Variant naming convention
+
+Match `run-ab-evaluation/SKILL.md`:
+
+| Variants observed | Control |
+|---|---|
+| `{"control", "treatment"}` | `control` |
+| `{"true", "false"}` | `true` |
+| anything else | alphabetic first |
+
+`bq_queries.deal_top_winners_losers` requires `@ctrl_name` as a parameter — pass the canonical control value. When pivoting `deal_by_category` and `deal_by_booking_platform` results in this skill, use the same `ctrl_name` as the IF-pivot key. **Always emit `ctrl_name` at the top level of the output JSON** so the renderer can detect the convention used and align with sibling AB output.
 
 ## Steps
 
-1. Run `bq_queries.deal_top_winners_losers` with parameters → split into `top_winners` (m1_delta DESC, top 10) and `top_losers` (m1_delta ASC, top 10).
-2. Run `bq_queries.deal_by_category` → compute per-category deltas (CVR_treat - CVR_ctrl, m1_treat - m1_ctrl).
-3. Run `bq_queries.deal_by_booking_platform` → per-platform breakdown.
+1. **Resolve ctrl_name.** If not provided, run `SELECT DISTINCT variantname FROM out_c_10_review_ab_experiments.review_experiments WHERE event_date BETWEEN @start_date AND @end_date AND (experimentname = @alternate_name OR ...)` and apply the convention table above.
+2. Run `bq_queries.deal_top_winners_losers` with `@ctrl_name=<resolved>` → split into `top_winners` (m1_delta DESC, top 10) and `top_losers` (m1_delta ASC, top 10).
+3. Run `bq_queries.deal_by_category` → pivot rows where `variantname = ctrl_name` into `*_ctrl` and the other variant into `*_treat`. Compute per-category deltas (cvr_treat - cvr_ctrl, m1_treat - m1_ctrl).
 4. **Enrich titles.** Collect the union of UUIDs across `top_winners` + `top_losers`. Run a single lookup against `kbc-grpn-40-0cd2.in_c_shr_dimension_datamart.deal_option` selecting `MAX(company_name)` and `MAX(deal_creative_content_title)` per `deal_uuid`. Merge results back into the rows so each contains `company_name` and `deal_title`.
-5. Write JSON:
+4. Write JSON:
 
 ```json
 {
   "alternate_name": "...",
+  "ctrl_name": "control|true|...",
   "top_winners": [{"deal_uuid":..., "deal_url":..., "category":..., "m1_delta":..., "company_name":..., "deal_title":...}, ...],
   "top_losers":  [...],
-  "by_category": [{"category":..., "cvr_delta":..., "m1_delta":..., "udv_ctrl":..., "udv_treat":...}, ...],
-  "by_booking_platform": [{"booking_platform":..., "deal_count":..., "m1_delta":...}, ...]
+  "by_category": [{"category":..., "cvr_delta":..., "m1_delta":..., "udv_ctrl":..., "udv_treat":...}, ...]
 }
 ```
 
