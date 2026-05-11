@@ -33,6 +33,8 @@ This module DOES NOT touch BigQuery. All enrichment must be done by upstream ski
 from __future__ import annotations
 
 import argparse
+import base64 as _b64
+import gzip as _gzip
 import json
 import math
 from html import escape as h
@@ -403,6 +405,26 @@ def _extract_docx_narrative(docx_path):
     return {k: v for k, v in sections.items() if v}
 
 
+def _gzip_b64_html(b64_html):
+    """Take a base64-encoded HTML blob, decode it, gzip-compress, and re-base64-encode.
+
+    Used to embed upstream SEO reports in the combined HTML at ~3-4% of the original
+    base64 size (gzip is highly effective on HTML/CSS/JS). The browser-side renderer
+    decompresses via DecompressionStream('gzip') before iframe srcdoc-ing the result.
+
+    Returns the gzipped+base64 string, or None when the input is falsy / undecodable.
+    Compresslevel 9 is used (decompression speed in JS is the same regardless of level).
+    """
+    if not b64_html:
+        return None
+    try:
+        raw = _b64.b64decode(b64_html)
+    except (ValueError, TypeError):
+        return None
+    gz = _gzip.compress(raw, compresslevel=9)
+    return _b64.b64encode(gz).decode("ascii")
+
+
 def _backfill_remediated_srm(rv):
     """Compute SRM on a remediated view when the subagent didn't emit one. Subagents
     historically emit `remediated.<view>.srm` only when they ran an explicit SRM check on
@@ -588,6 +610,11 @@ def stats_for_daily(daily, metric, num_field=None, den_field=None):
     be computed and this function returns None. Daily-mean-based percentages are not
     produced — silently falling back to a daily-mean pct diverges from Groupon dashboards
     by ~0.1-0.2pp when daily UV/UDV varies, so the contract is enforced strictly.
+
+    Per-day ratio keys (`<metric>_ctrl`/`<metric>_treat`) are preferred for the paired
+    t-test diffs, but when a subagent emits only the raw totals the ratios are derived
+    on the fly from `<num>_ctrl/<den>_ctrl` so the renderer doesn't go n/a for an AB
+    JSON that includes the math inputs but not the pre-divided values.
     """
     if num_field is None or den_field is None:
         if metric == "m1uv":
@@ -597,10 +624,20 @@ def stats_for_daily(daily, metric, num_field=None, den_field=None):
         else:
             num_field, den_field = metric, "uv"
 
+    def _ratio(r, side):
+        explicit = r.get(f"{metric}_{side}")
+        if explicit is not None:
+            return explicit
+        num = r.get(f"{num_field}_{side}")
+        den = r.get(f"{den_field}_{side}")
+        if num is None or den in (None, 0):
+            return None
+        return float(num) / float(den)
+
     diffs = []
     for r in daily or []:
-        ct = r.get(f"{metric}_ctrl")
-        tt = r.get(f"{metric}_treat")
+        ct = _ratio(r, "ctrl")
+        tt = _ratio(r, "treat")
         if ct is None or tt is None:
             continue
         diffs.append(tt - ct)
@@ -895,9 +932,12 @@ def build_payload(name, exp, run_id, data_through):
 
     # Overall daily (deal-scoped): prefer ab.overall_daily if pre-computed by upstream;
     # else fall back to filtered.daily (M1/UV only) — CVR will be missing.
+    # `stats_for_daily` derives per-day ratios from raw totals (m1/uv, orders/udv) when
+    # the explicit ratio keys are absent, so any daily-row shape that carries the totals
+    # produces a result; only shapes that omit BOTH ratios and totals return None.
     overall_daily = ab.get("overall_daily") or raw_filt.get("daily") or []
-    overall_m1uv = stats_for_daily(overall_daily, "m1uv") if overall_daily and "m1uv_ctrl" in (overall_daily[0] if overall_daily else {}) else None
-    overall_cvr = stats_for_daily(overall_daily, "cvr") if overall_daily and "cvr_ctrl" in (overall_daily[0] if overall_daily else {}) else None
+    overall_m1uv = stats_for_daily(overall_daily, "m1uv") if overall_daily else None
+    overall_cvr  = stats_for_daily(overall_daily, "cvr")  if overall_daily else None
 
     # Unfiltered (population-wide) headline stats from raw.overall.daily — these are the
     # canonical "AB Test" headline numbers (whole-population; not deal-scoped). Scorecard
@@ -920,10 +960,12 @@ def build_payload(name, exp, run_id, data_through):
                 start_date = start_date or min(ds)
                 end_date = end_date or max(ds)
                 break
-    _has_m1uv_totals = bool(raw_ovr_daily) and isinstance(raw_ovr_daily[0], dict) and "m1uv_ctrl" in raw_ovr_daily[0]
-    _has_cvr_totals  = bool(raw_ovr_daily) and isinstance(raw_ovr_daily[0], dict) and "cvr_ctrl"  in raw_ovr_daily[0]
-    unfiltered_m1uv = stats_for_daily(raw_ovr_daily, "m1uv") if _has_m1uv_totals else None
-    unfiltered_cvr  = stats_for_daily(raw_ovr_daily, "cvr")  if _has_cvr_totals  else None
+    # No explicit gate on m1uv_ctrl/cvr_ctrl — `stats_for_daily` derives ratios from raw
+    # totals (m1/uv, orders/udv) when the pre-divided keys are absent. Subagents that
+    # emit only totals (e.g. earlier FAQ-reviews AB shape) now produce populated tiles
+    # instead of n/a.
+    unfiltered_m1uv = stats_for_daily(raw_ovr_daily, "m1uv") if raw_ovr_daily else None
+    unfiltered_cvr  = stats_for_daily(raw_ovr_daily, "cvr")  if raw_ovr_daily else None
 
     f_stats = _flatten_stats(raw_filt.get("stats") or {})
     o_stats = _flatten_stats(raw_ovr.get("stats") or {})
@@ -986,8 +1028,12 @@ def build_payload(name, exp, run_id, data_through):
             "caveats": seo.get("caveats") or [],
             # Derived helpers (computed once here so JS doesn't need pp arithmetic)
             "did_ctr_pp_overall": _seo_overall_ctr_did_pp(seo.get("summary_tables") or {}),
-            # Embedded upstream HTML report (base64); rendered as iframe srcdoc
-            "upstream_html_b64": seo.get("upstream_html_b64"),
+            # Embedded upstream HTML report — gzipped + base64 to keep the combined
+            # report small enough to share as a single file. Decompressed in the
+            # browser via DecompressionStream('gzip') before iframe srcdoc.
+            # Compression saves ~95-97% on typical SEO HTML (it's mostly repeated
+            # CSS/JS/Chart.js configs that gzip extremely well).
+            "upstream_html_b64_gz": _gzip_b64_html(seo.get("upstream_html_b64")),
             "passthrough_html": seo.get("passthrough_html"),
             "passthrough_xlsx": seo.get("passthrough_xlsx"),
             # Skipped/failed reasons preserved
@@ -1110,7 +1156,8 @@ td.label,th.label { text-align:left; }
 .badge-verdict-ship { background:#c6f6d5; color:#22543d; }
 .badge-verdict-kill { background:#fed7d7; color:#742a2a; }
 .badge-verdict-neutral { background:#fefcbf; color:#744210; }
-.exec-card-tiles { display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; }
+.exec-card-tiles { display:grid; grid-template-columns:repeat(5, 1fr); gap:10px; }
+@media (max-width:1100px) { .exec-card-tiles { grid-template-columns:repeat(3, 1fr); } }
 @media (max-width:760px) { .exec-card-tiles { grid-template-columns:repeat(2, 1fr); } }
 .exec-tile { background:var(--bg); border-radius:6px; padding:11px 13px; border-left:3px solid var(--border); }
 .exec-tile.pos { border-left-color:var(--green); background:#f0fff4; }
@@ -1168,7 +1215,7 @@ footer { background:#1a202c; color:#a0aec0; text-align:center; padding:20px; fon
 
 </div>
 
-<footer><div class="container">paired t-test α=0.05 · SRM chi-square α=0.001 · dates from test_definitions, NOT GrowthBook · M1/UV = margin_1_vfm / uv · CVR = ue_orders / udv</div></footer>
+<footer><div class="container">paired t-test α=0.05 · SRM chi-square α=0.001 · dates from test_definitions, NOT GrowthBook · M1+VFM/UV = margin_1_vfm / uv · CVR = ue_orders / udv</div></footer>
 
 <script id="data" type="application/json">__PAYLOAD__</script>
 <script>
@@ -1291,22 +1338,31 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
         f_p = f_stats.get("p_value") or 1
         ab_verdict = raw_filt.get("verdict") or (raw.get("overall") or {}).get("verdict") or "?"
 
-        # Canonical recompute: mirror build_payload() so the summary headline matches the HTML chip.
-        overall_daily = ab.get("overall_daily") or raw_filt.get("daily") or []
-        first = overall_daily[0] if overall_daily else {}
-        om = stats_for_daily(overall_daily, "m1uv") if overall_daily and "m1uv_ctrl" in first else None
-        oc = stats_for_daily(overall_daily, "cvr") if overall_daily and "cvr_ctrl" in first else None
+        # Canonical recompute: mirror build_payload(). Source the AB-Overall view first
+        # (population-wide, `raw.overall.daily` from experiments_jupiter_hist) since that
+        # matches what the exec-card top tiles show. Fall back to AB-Filtered only when
+        # Overall is absent. `stats_for_daily` derives per-day ratios from raw totals
+        # when explicit ratio keys are missing, so no strict gate.
+        raw_ovr = raw.get("overall") or {}
+        ovr_daily = raw_ovr.get("daily") or []
+        scope_label = "AB-Overall"
+        if not ovr_daily:
+            ovr_daily = raw_filt.get("daily") or []
+            scope_label = "AB-Filtered (no Overall view)" if ovr_daily else "n/a"
+        om = stats_for_daily(ovr_daily, "m1uv") if ovr_daily else None
+        oc = stats_for_daily(ovr_daily, "cvr")  if ovr_daily else None
 
         m_md = om.get("mean_delta_pct") if om else None
         m_p = om.get("p_value") if om else None
         c_md = oc.get("mean_delta_pct") if oc else None
         ab_summary = (
-            f"M1/UV {m_md:+.2f}% (p={m_p:.3f})"
+            f"M1+VFM/UV {m_md:+.2f}% (p={m_p:.3f})"
             if m_md is not None and m_p is not None
             else f"MPV mean Δ ${f_md:+.4f} (p={f_p:.3f})"
         )
         if c_md is not None:
             ab_summary += f", CVR {c_md:+.2f}%"
+        ab_summary += f" · scope: {scope_label}"
 
         n_deals = exp.get("n_deals")
         header_suffix = f" — {n_deals:,} deals" if isinstance(n_deals, int) and n_deals > 0 else ""
@@ -1339,7 +1395,7 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
         "",
         "## Methodology",
         "- AB %Δ: aggregate ratio SUM(num)/SUM(den) (ab-experiments canon, matches Groupon dashboards). Daily means are not used.",
-        "- AB significance: paired t-test on daily M1/UV, α=0.05.",
+        "- AB significance: paired t-test on daily M1+VFM/UV, α=0.05.",
         "- SRM check: chi-square, α=0.001. Active-visitor remediation surfaces when raw fails AND AV passes.",
         "- SEO: synthetic-control DiD on impressions / clicks (hierarchical L3→L2→L1→page_type→domain peer cohort), variant-vs-whole-domain CTR DiD, and verdict from `seo-impact-plugin:seo-impact-analyzer`. Per-category SEO is variant Δ% minus same-category All-Groupon Δ% (benchmark spread).",
         "",

@@ -1,3 +1,130 @@
+0.6.3 — Robustness fixes from /evaluate-reviews-experiments run (2026-05-11 night):
+  - skills/resolve-deal-urls/SKILL.md — mandates `--max_rows=500000` (was unset → bq CLI default
+    silently truncated). Added truncation-detection rule: after writing the JSON, count entries vs
+    `SELECT COUNT(DISTINCT deal_uuid)` over the same `test_deals` filter; fail loudly if the resolved
+    count equals (or is suspiciously close to) the `--max_rows` value. Observed regression:
+    "AI Summaries v4 - Single format 30k" (30,520 deals in test_deals) was clipped to 10,000 deals
+    by an orchestrator-side `--max_rows=10000`, propagating downstream as 5,933-of-30,520 SEO
+    ingestion (62% missing). SEO verdict at the truncated subset read SHIP (DiD Impressions +25.87%,
+    Clicks +6.63%) but flipped to INCONCLUSIVE with the full set (DiD Impressions −12.62%, Clicks
+    +0.82%) — the 10k subset was biased toward higher-impression deals.
+  - scripts/lib/render.py:stats_for_daily() — now derives per-day ratios from raw totals
+    (`m1uv = m1/uv`, `cvr = orders/udv`) when explicit `<metric>_ctrl`/`<metric>_treat` keys are
+    absent. Removed three strict pre-check gates (`"m1uv_ctrl" in daily[0]`) at lines 921, 945
+    (build_payload) and 1344 (write_summary_md). Subagent JSONs that emit only raw totals (the
+    FAQ reviews AB shape) now produce populated exec tiles instead of "n/a". Smoke-tested 3 cases:
+    totals-only → derives correctly; totals+explicit-ratios → identical result, prefers explicit;
+    ratios-only-no-totals → returns None (no aggregate base — correct).
+  - scripts/lib/render.py:write_summary_md() — now sources `raw.overall.daily` (AB-Overall,
+    population-wide via experiments_jupiter_hist) explicitly, with fallback to filtered only when
+    Overall is absent. Stamps `scope: AB-Overall` on every summary line. Was silently falling back
+    to `raw.filtered.daily` (deal-scoped via review_experiments_hist) because the legacy
+    `ab.overall_daily` key was unset — the summary headline therefore showed deal-filtered numbers
+    while the HTML exec card showed population-wide, an inconsistency that confused cross-run
+    comparisons. The flip is dramatic on FAQ reviews: −9.15% (deal-filtered) → +1.78% (population
+    overall) — sign-flipped because deal-scoped is a small high-variance subset.
+  - skills/run-ab-evaluation/SKILL.md step 2 — added "Mandatory daily-row shape" clause requiring
+    `m1uv_ctrl/treat` and `cvr_ctrl/treat` per daily row (formula: `m1uv_<side> = m1_<side> /
+    uv_<side>`; `cvr_<side> = orders_<side> / udv_<side>`; guard zero-denominator days with None).
+    Belt-and-suspenders since the renderer now derives anyway, but enforces the contract at source
+    so future subagent regressions are caught upstream. Cites the FAQ-reviews regression.
+  - Validated cached JSON against fresh `experiments_jupiter_hist` query for FAQ reviews (closed
+    2026-04-25, 35 days past start): byte-identical SUMs → no retention drift on jupiter_hist
+    (~120-day retention). `review_experiments_hist` has shorter (~30-day) retention so the
+    Filtered view may bite for older closed experiments — yet another reason summary.md should
+    source Overall.
+
+0.6.2 — Filtered table swap to _hist + locked date-window contract:
+  - bq_queries.sql — swapped `review_experiments` → `review_experiments_hist` in 3 FROM clauses
+    (`ab_filtered_raw`, `ab_filtered_remediated`, `category_daily`) + the `ab_filtered_raw` description
+    comment. `_hist` retains longer history (919K rows on 2026-05-11); identical schema (UV, UDV,
+    margin_1_vfm, ue_orders, gross_bookings, distinct_bcookie_count, active_visitor_flag, region,
+    groupon_version, log_status all present). The non-hist table has ~30-day rolling retention which
+    silently truncated FAQ reviews' first 4-5 days. `_deal` references kept on `review_experiments_deal`
+    (separate table). `fixtures/review_experiments.schema.json` + `tests/test_schema_drift.py` not
+    renamed in this version — flagged as open follow-up.
+  - skills/run-ab-evaluation/SKILL.md — updated 4 prose mentions of `review_experiments` →
+    `review_experiments_hist` in the ownership table, step 6, step 6a, and failure modes.
+  - skills/run-deal-charts/SKILL.md — updated the ctrl_name lookup SQL example to reference
+    `review_experiments_hist`.
+  - skills/run-ab-evaluation/SKILL.md — added "Date window is LOCKED — no trimming, no ramp-up
+    dropping" subsection under Tool contract. Hard rules: subagents MUST pass `@start_date`/`@end_date`
+    verbatim to every BQ query; MUST emit daily arrays covering every calendar date in the window
+    (zero-row days emitted as-is so SRM and paired t-test run on the full window); MUST NOT apply
+    ramp-up offsets, warm-up trims, or early/late exclusion. Applies to raw, remediated,
+    per_category, per_category_overall.
+  - skills/run-deal-charts/SKILL.md — same locked-window clause added under Tool contract.
+  - skills/orchestrator-workflow/SKILL.md — same locked-window contract added under Tool contract so
+    it is visible at the orchestrator level.
+  - Reason: user observed FAQ reviews headline %Δ shifting across reruns despite the experiment being
+    closed. Cross-run SUM diff (overall m1_ctrl=17,397.93 byte-identical May 6 ↔ May 11; filtered
+    differed because the non-hist table had purged Apr 6-9) proved the source was frozen for the dates
+    that existed in both runs. The `_hist` swap fixes the retention truncation; the locked-window
+    contract prevents future Opus-subagent-side trimming heuristics.
+  - Local-only; not pushed to GitHub.
+
+0.6.1 — Fix remediation column on experiments_jupiter_hist:
+  - bq_queries.sql `ab_overall_remediated` — changed remediation filter from `search_visitor_flag = 'Y'`
+    (introduced incorrectly in 0.6.0) to `active_visitor_flag = 'Y'`. The hist table has both columns;
+    `search_visitor_flag` is a strict subset (search-acquired traffic only), `active_visitor_flag` is
+    the actual equivalent of the legacy `active_visitor.is_active_visitor = 1` join.
+  - Validated 2026-05-11 against FAQ reviews: with `active_visitor_flag='Y'` ctrl/treat M1+VFM/UV =
+    $2.60 / $2.64 (+1.78%), matching the legacy join's $2.59 / $2.52 magnitude within +-2c. With
+    `search_visitor_flag='Y'` the same query produced $4.06 / $4.63 (+14%), which is search-acquired
+    traffic only and not equivalent to active-visitor remediation.
+  - skills/run-ab-evaluation/SKILL.md — column reference + warning added.
+  - Local-only; not pushed to GitHub.
+
+0.6.0 — AB Overall canonical-table swap:
+  - bq_queries.sql `ab_overall_raw` — swapped `bcookie_with_experiment_from_jupiter.experiment`
+    + LEFT JOIN `combined_data` for `bcookie_with_experiment_from_jupiter.experiments_jupiter_hist`
+    (pre-aggregated; matches ab-experiments plugin canon). Direct SUM of UV / UDV / margin_1_vfm /
+    ue_orders / gross_bookings / distinct_bcookie_count from the hist table. No more bcookie-level
+    join. Adds `search_visitor_flag` to the projection so the renderer can show "active vs all" if
+    needed. Reason: the legacy `experiment` table has a rolling ~30-day window (Apr 10/11 → May 9/10
+    observed 2026-05-11), silently truncating any test that closed >30d ago; hist has ~120 days of
+    coverage and is the source of truth used by the ab-experiments plugin's own queries.
+  - bq_queries.sql `ab_overall_remediated` — swapped from `experiment ∩ active_visitor (is_active_visitor=1)
+    + combined_data` chain to `experiments_jupiter_hist WHERE search_visitor_flag = 'Y'`. Data owner
+    confirmed `search_visitor_flag` on the hist table is the same column that backed the legacy
+    `active_visitor.is_active_visitor=1` join. SRM remediation now runs on the same pre-aggregated
+    source. (In practice the hist table's raw SRM usually already passes because non-search/non-active
+    rows are absent from the rollup; remediation is a fallback, not a routine path.)
+  - bq_queries.sql `overall_per_cat_daily` — same swap. PerCategory Overall (for `use_deal_category_split=TRUE`
+    experiments) now reads from hist with a single STRUCT-array UNNEST projection of (sub_experiment_name → category).
+  - skills/run-ab-evaluation/SKILL.md — updated "What this skill does itself" table + step 6a to
+    name `experiments_jupiter_hist` as the AB-Overall source. Remediation row now says
+    `search_visitor_flag='Y'` instead of `active_visitor` join.
+  - Behavioral consequence: AB-Overall verdicts and headlines may shift on existing tests when re-run
+    (FAQ reviews: M1+VFM/UV went from -2.87% remediated on Apr 11-25 window to +1.78% raw on Apr 6-25
+    window; sign + magnitude changed because the hist grain doesn't have bcookie-level imbalance and
+    captures the full registered window). Re-evaluate any test whose verdict was load-bearing under v0.5.x.
+  - Local-only; not pushed to GitHub.
+
+0.5.2 — Determinism + model consistency:
+  - scripts/run_seo_pipeline.py — new parametric Python entrypoint that drives the upstream
+    seo-impact-plugin (classify → fetch → enrich → analyze → generate) by importing the
+    modules directly. Skips upstream resolve() / mds-insights since urls_<alt>.json is
+    pre-enriched by resolve-deal-urls. Same inputs now produce byte-identical seo_<alt>.json
+    across runs.
+  - skills/run-seo-evaluation/SKILL.md — rewritten as a thin shim that shells out to
+    run_seo_pipeline.py. No more per-stage prompt dispatch (seo-guardrails / page-classifier
+    / gsc-fetcher / impact-analyzer / report-generator dispatch chain removed).
+  - commands/evaluate-reviews-experiments.md + skills/orchestrator-workflow/SKILL.md —
+    subagent model flipped sonnet → opus for all three subagents (run-ab-evaluation,
+    run-seo-evaluation, run-deal-charts). Consistency over cost: verdict synthesis, SRM
+    remediation, and narrative interpretation now run on the same model as the orchestrator.
+  - Output schema unchanged — renderer compatibility preserved (still emits
+    upstream_html_b64 plain; render.py gzip-wraps it before embedding).
+
+0.5.1 — local-only polish (see project memory for full notes):
+  - render.py + render_app.js — gzip-compress + DecompressionStream-decode embedded SEO HTML
+    (54.7 MB → 2.2 MB combined report). lineChart dailyLabel fallback for AI_Summaries.
+    Exec card restructure: Total estimated margin impact tile first; Confidence/Why/Action
+    rows replace single-sentence Takeaway. M1 → M1+VFM rename in 18 user-visible spots.
+    Two-line scope/scale subtitle. "FINAL — can be closed" → "FINAL"; FINAL (could extend)
+    → "FINAL — could extend". SHOW_OVERVIEW_TAB feature flag.
+
 0.1.0 — plugin scaffolding + marketplace.json registration
 0.1.0 — tool_contract.py + tests
 0.1.1 — stats.paired_ttest, stats.cohens_d

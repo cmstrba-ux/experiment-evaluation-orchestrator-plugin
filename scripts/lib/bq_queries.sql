@@ -16,7 +16,7 @@ WHERE (NULLIF(@explicit_name, '') IS NULL OR alternate_name = @explicit_name)
 ORDER BY start_date DESC;
 
 -- name: ab_filtered_raw
--- description: AB-Filtered view from review_experiments (precise OR per spec §4).
+-- description: AB-Filtered view from review_experiments_hist (precise OR per spec §4).
 -- params: @alternate_name (STRING), @start_date (DATE), @end_date (DATE)
 SELECT
   event_date, experimentname, variantname, country, region, clientPlatform, groupon_version,
@@ -27,7 +27,7 @@ SELECT
   SUM(margin_1_vfm) AS margin_1_vfm,
   SUM(ue_orders) AS ue_orders,
   SUM(gross_bookings) AS gross_bookings
-FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments`
+FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments_hist`
 WHERE event_date BETWEEN @start_date AND @end_date
   AND (
     experimentname = @alternate_name
@@ -48,7 +48,7 @@ SELECT
   SUM(margin_1_vfm) AS margin_1_vfm,
   SUM(ue_orders) AS ue_orders,
   SUM(gross_bookings) AS gross_bookings
-FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments`
+FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments_hist`
 WHERE event_date BETWEEN @start_date AND @end_date
   AND active_visitor_flag = 'Y'
   AND (
@@ -59,40 +59,48 @@ WHERE event_date BETWEEN @start_date AND @end_date
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
 
 -- name: ab_overall_raw
--- description: AB-Overall (population-wide) view from experiment × combined_data. Uses test_definitions dates (NOT GrowthBook dates) for consistency with AB-Filtered.
+-- description: AB-Overall (population-wide) view from experiments_jupiter_hist (pre-aggregated). Matches the canonical ab-experiments plugin table. Uses test_definitions dates (NOT GrowthBook dates) for consistency with AB-Filtered. Date window strictly clipped to test_definitions.end_date even though hist covers ~120d.
 -- params: @experiment_name (STRING), @start_date (DATE), @end_date (DATE)
 SELECT
-  e.event_date,
-  e.experimentname,
-  e.variantname,
-  COALESCE(cd.country, e.country) AS country,
-  e.clientPlatform,
-  e.distinct_bcookie_count,
-  cd.uv, cd.udv, cd.ue_orders, cd.margin_1_vfm, cd.gross_bookings, cd.log_status
-FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiment` AS e
-LEFT JOIN `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.combined_data` AS cd
-  ON cd.event_date = e.event_date AND cd.bcookie = e.bcookie
-WHERE e.experimentname = @experiment_name
-  AND e.event_date BETWEEN @start_date AND @end_date;
+  event_date,
+  experimentname,
+  variantname,
+  country,
+  clientPlatform,
+  log_status,
+  search_visitor_flag,
+  SUM(UV) AS uv,
+  SUM(UDV) AS udv,
+  SUM(ue_orders) AS ue_orders,
+  SUM(margin_1_vfm) AS margin_1_vfm,
+  SUM(gross_bookings) AS gross_bookings,
+  SUM(distinct_bcookie_count) AS distinct_bcookie_count
+FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiments_jupiter_hist`
+WHERE experimentname = @experiment_name
+  AND event_date BETWEEN @start_date AND @end_date
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
 
 -- name: ab_overall_remediated
--- description: AB-Overall filtered to active_visitor (SRM remediation).
+-- description: AB-Overall SRM remediation via active_visitor_flag='Y' on experiments_jupiter_hist. The hist table's active_visitor_flag is the same filter as is_active_visitor=1 in the legacy active_visitor join table — validated 2026-05-11 against FAQ reviews (M1/UV magnitudes match within +-2c after accounting for 5-day window expansion). DO NOT confuse with search_visitor_flag, which is a stricter subset (search-acquired traffic only).
 -- params: @experiment_name (STRING), @start_date (DATE), @end_date (DATE)
 SELECT
-  e.event_date,
-  e.experimentname,
-  e.variantname,
-  COALESCE(cd.country, e.country) AS country,
-  e.clientPlatform,
-  e.distinct_bcookie_count,
-  cd.uv, cd.udv, cd.ue_orders, cd.margin_1_vfm, cd.gross_bookings, cd.log_status
-FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiment` AS e
-INNER JOIN `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.active_visitor` AS av
-  ON av.bcookie = e.bcookie AND av.event_date = e.event_date AND av.is_active_visitor = 1
-LEFT JOIN `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.combined_data` AS cd
-  ON cd.event_date = e.event_date AND cd.bcookie = e.bcookie
-WHERE e.experimentname = @experiment_name
-  AND e.event_date BETWEEN @start_date AND @end_date;
+  event_date,
+  experimentname,
+  variantname,
+  country,
+  clientPlatform,
+  log_status,
+  SUM(UV) AS uv,
+  SUM(UDV) AS udv,
+  SUM(ue_orders) AS ue_orders,
+  SUM(margin_1_vfm) AS margin_1_vfm,
+  SUM(gross_bookings) AS gross_bookings,
+  SUM(distinct_bcookie_count) AS distinct_bcookie_count
+FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiments_jupiter_hist`
+WHERE experimentname = @experiment_name
+  AND event_date BETWEEN @start_date AND @end_date
+  AND active_visitor_flag = 'Y'
+GROUP BY 1, 2, 3, 4, 5, 6;
 
 -- name: resolve_deal_urls
 -- description: Resolve test_deals → deal_url + metadata. Replaces MDS/Okta enrichment.
@@ -198,7 +206,7 @@ WITH base AS (
   SELECT
     event_date, experimentname, variantname,
     SUM(uv) AS uv, SUM(udv) AS udv, SUM(ue_orders) AS ue_orders, SUM(margin_1_vfm) AS margin_1_vfm
-  FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments`
+  FROM `kbc-grpn-40-0cd2.out_c_10_review_ab_experiments.review_experiments_hist`
   WHERE event_date BETWEEN @start_date AND @end_date
     AND (
       experimentname = @alternate_name
@@ -253,25 +261,23 @@ GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
 
 -- name: overall_per_cat_daily
--- description: AB-Overall (population-wide) per-category daily stats. Each category split is
---   its own GrowthBook experiment ('xp-mbnxt-XXXXX-ai-review-summary-<slug>'), so we query
---   the bcookie experiment+combined_data path once per sub-experiment in a single UNION-style
---   select via a STRUCT array of (name, cat). Caller passes the array as @sub_experiments.
+-- description: AB-Overall (population-wide) per-category daily stats from experiments_jupiter_hist.
+--   Each category split is its own GrowthBook experiment ('xp-mbnxt-XXXXX-ai-review-summary-<slug>'),
+--   so we filter the pre-aggregated hist table by sub-experiment name. Caller passes a STRUCT array
+--   of (name, cat) as @sub_experiments to project category labels.
 -- params: @sub_experiments (ARRAY<STRUCT<name STRING, cat STRING>>), @start_date (DATE), @end_date (DATE)
 SELECT
   exps.cat AS category,
-  e.event_date,
-  e.variantname,
-  SUM(e.distinct_bcookie_count) AS bcookies,
-  SUM(cd.uv) AS uv,
-  SUM(cd.udv) AS udv,
-  SUM(cd.ue_orders) AS orders,
-  SUM(cd.margin_1_vfm) AS m1
-FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiment` AS e
-JOIN UNNEST(@sub_experiments) AS exps ON exps.name = e.experimentname
-LEFT JOIN `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.combined_data` AS cd
-  ON cd.event_date = e.event_date AND cd.bcookie = e.bcookie
-WHERE e.event_date BETWEEN @start_date AND @end_date
+  h.event_date,
+  h.variantname,
+  SUM(h.distinct_bcookie_count) AS bcookies,
+  SUM(h.UV) AS uv,
+  SUM(h.UDV) AS udv,
+  SUM(h.ue_orders) AS orders,
+  SUM(h.margin_1_vfm) AS m1
+FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiments_jupiter_hist` AS h
+JOIN UNNEST(@sub_experiments) AS exps ON exps.name = h.experimentname
+WHERE h.event_date BETWEEN @start_date AND @end_date
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
 

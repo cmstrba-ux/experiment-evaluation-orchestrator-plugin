@@ -99,7 +99,7 @@ function buildScopeSubtitle(D, opts) {
   const seo = seoScopeTotals(D);
   const line2Parts = [];
   if (ab.uv != null) line2Parts.push(`${compactNum(ab.uv)} UVs`);
-  if (ab.m1 != null) line2Parts.push(`${compactMoney(ab.m1)} M1 VFM`);
+  if (ab.m1 != null) line2Parts.push(`${compactMoney(ab.m1)} M1+VFM`);
   if (seo.imp != null) line2Parts.push(`${compactNum(seo.imp)} impressions`);
   if (seo.clk != null) line2Parts.push(`${compactNum(seo.clk)} clicks`);
 
@@ -155,13 +155,23 @@ function mpvFromM1UVAndCVR(m1uvPct, cvrPct) {
   return ((1 + m1uvPct/100) / denom - 1) * 100;
 }
 
+// Read the date label from a daily row. Subagents emit different keys depending on
+// the source: most use `event_date`, some (AI_Summaries pattern) use `date`, the
+// legacy ratio-only shape uses `d`. Falling through them all keeps lineChart agnostic
+// so a key mismatch doesn't silently produce a chart with all-undefined x-axis
+// labels (which Chart.js renders blank, looking like a broken chart).
+function dailyLabel(row) {
+  if (!row) return null;
+  return row.event_date || row.date || row.d || null;
+}
+
 function lineChart(id, daily, ctrlKey, treatKey, ylabel) {
   const ctx = document.getElementById(id);
   if (!ctx || !daily || !daily.length) return;
   if (charts[id]) charts[id].destroy();
   charts[id] = new Chart(ctx, {
     type:'line',
-    data:{ labels: daily.map(d=>d.d || d.event_date),
+    data:{ labels: daily.map(dailyLabel),
       datasets:[
         {label:'Control',   data:daily.map(d=>d[ctrlKey] ?? d.ctrl),   borderColor:'#4A90D9', backgroundColor:'rgba(74,144,217,0.1)', tension:0.25, pointRadius:3},
         {label:'Treatment', data:daily.map(d=>d[treatKey] ?? d.treat), borderColor:'#E8734A', backgroundColor:'rgba(232,115,74,0.1)', tension:0.25, pointRadius:3},
@@ -326,6 +336,7 @@ function buildExecCard(name, D) {
   const cvrPct  = oc ? oc.mean_delta_pct : null;
   const cvrP    = oc ? oc.p_value : null;
   const clkPct  = (did.did_clicks_pct == null) ? null : did.did_clicks_pct;
+  const impPct  = (did.did_impressions_pct == null) ? null : did.did_impressions_pct;
   const seoP    = power.p_value;
   const totalPct = expectedFunnelTotal(clkPct, m1uvPct);
 
@@ -369,9 +380,10 @@ function buildExecCard(name, D) {
     ${subtitleHtml}
     <div class="exec-card-tiles">
       ${tile('Total estimated margin impact', totalPct, null, 0.5)}
-      ${tile('M1/UV %Δ',                      m1uvPct, m1uvP, 0.5)}
+      ${tile('M1+VFM/UV %Δ',                  m1uvPct, m1uvP, 0.5)}
       ${tile('CVR %Δ',                        cvrPct,  cvrP,  0.5)}
       ${tile('SEO Clicks',                    clkPct,  seoP,  1.0)}
+      ${tile('SEO Impressions',               impPct,  seoP,  1.0)}
     </div>
     ${takeawayHtml}
   </div>`;
@@ -402,7 +414,7 @@ function renderExecTakeaway(D) {
   // uncertain" narrative — that's where subset-level (per-platform / per-category)
   // significance often hides for tests with weak overall signal.
   const sigParts = [];
-  if (m1uvSig) sigParts.push('M1/UV');
+  if (m1uvSig) sigParts.push('M1+VFM/UV');
   if (cvrSig) sigParts.push('CVR');
   if (seoSig) sigParts.push('SEO');
   let confidenceCls = 'exec-conf-low';
@@ -420,7 +432,7 @@ function renderExecTakeaway(D) {
     }
   } else if (sigParts.length === 3) {
     confidenceCls = 'exec-conf-high';
-    confidenceText = `<strong>Statistically significant on all three headline metrics</strong> (M1/UV, CVR, SEO at p&lt;0.05).`;
+    confidenceText = `<strong>Statistically significant on all three headline metrics</strong> (M1+VFM/UV, CVR, SEO at p&lt;0.05).`;
   } else {
     confidenceCls = 'exec-conf-mid';
     confidenceText = `<strong>Statistically significant on ${sigParts.join(' &amp; ')}</strong> (p&lt;0.05); other headline metrics directional only.`;
@@ -499,9 +511,9 @@ function execTakeaway(D) {
   const cv = oc ? oc.mean_delta_pct : null;
   const ck = (did.did_clicks_pct == null) ? null : did.did_clicks_pct;
   const fmt = (v) => v == null ? 'n/a' : fmtPctOf(v);
-  if (verdict === 'KILL') return `Recommend KILL — M1/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — net negative funnel.`;
-  if (verdict === 'SHIP') return `Recommend SHIP — M1/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — net positive funnel.`;
-  return `Inconclusive — M1/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — needs more data or clearer signal.`;
+  if (verdict === 'KILL') return `Recommend KILL — M1+VFM/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — net negative funnel.`;
+  if (verdict === 'SHIP') return `Recommend SHIP — M1+VFM/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — net positive funnel.`;
+  return `Inconclusive — M1+VFM/UV ${fmt(m1)}, CVR ${fmt(cv)}, SEO clicks ${fmt(ck)} — needs more data or clearer signal.`;
 }
 
 // Builds the per-experiment scorecard HTML used inside the new Overview sub-tab.
@@ -617,7 +629,7 @@ function buildScorecardHtml(name, D) {
     // (population-wide / unfiltered) so the headline matches the canonical AB test result.
     const abSection = `
       <div class="sec-title">AB Population-wide</div>
-      ${metricRow('M1/UV %Δ', m1uvPct, m1uvP, 3, 'pct', true)}
+      ${metricRow('M1+VFM/UV %Δ', m1uvPct, m1uvP, 3, 'pct', true)}
       ${metricRow('CVR %Δ',   cvrPct,  cvrP,  3, 'pct', false)}
       <div class="row" style="padding-top:6px"><span class="lbl">AB verdict</span><span><span class="badge ${verdictBadgeCls(v)}">${v}</span></span></div>`;
 
@@ -651,8 +663,8 @@ function buildScorecardHtml(name, D) {
     let funnelFormulaLine = '';
     if (totalPct != null) {
       const note = (clkPct == null)
-        ? 'Formula: total = AB M1/UV %Δ (no SEO traffic signal to compose with).'
-        : 'Formula: total = (1 + SEO clicks %Δ) × (1 + AB M1/UV %Δ) − 1. M1/UV already includes CVR × margin-per-order, so we don\'t multiply CVR a third time. The CVR / Margin-per-order decomposition is shown for attribution only — Margin/order is back-solved as (1+M1/UV)/(1+CVR)−1.';
+        ? 'Formula: total = AB M1+VFM/UV %Δ (no SEO traffic signal to compose with).'
+        : 'Formula: total = (1 + SEO clicks %Δ) × (1 + AB M1+VFM/UV %Δ) − 1. M1+VFM/UV already includes CVR × margin-per-order, so we don\'t multiply CVR a third time. The CVR / Margin-per-order decomposition is shown for attribution only — Margin/order is back-solved as (1+M1+VFM/UV)/(1+CVR)−1.';
       const interp = 'Interpretation: positive means shipping is expected to grow margin; negative means it would shrink it. Magnitudes under ±0.5% are typically within noise on short windows.';
       funnelFormulaLine = `<div class="row" style="font-size:0.78rem;flex-direction:column;align-items:flex-start;gap:4px"><span class="lbl">Funnel formula</span><span class="muted">${note}</span><span class="muted">${interp}</span></div>`;
     }
@@ -715,7 +727,7 @@ function expBody(name) {
       <p class="muted" style="margin-bottom:12px">Window: ${D.start_date} → ${D.end_date}. AB-Filtered metrics shown over time.</p>
       <div id="rationale-${sl}"></div>
       <div class="chart-grid-2">
-        <div><h4 style="font-size:0.95rem;margin-bottom:6px">M1/UV (margin per unique visitor)</h4><div class="chart-wrap"><canvas id="ch-${sl}-m1uv"></canvas></div></div>
+        <div><h4 style="font-size:0.95rem;margin-bottom:6px">M1+VFM/UV (margin per unique visitor)</h4><div class="chart-wrap"><canvas id="ch-${sl}-m1uv"></canvas></div></div>
         <div><h4 style="font-size:0.95rem;margin-bottom:6px">CVR (orders / UDV)</h4><div class="chart-wrap"><canvas id="ch-${sl}-cvr"></canvas></div></div>
       </div>
     </div>
@@ -864,7 +876,7 @@ function buildVerdictRationale(D) {
 
   // Rank candidate metrics by magnitude (signed) so we can call out the dominant signal.
   const candidates = [];
-  if (m1uvPct != null) candidates.push({label: 'M1/UV', pct: m1uvPct, p: m1uvP});
+  if (m1uvPct != null) candidates.push({label: 'M1+VFM/UV', pct: m1uvPct, p: m1uvP});
   if (cvrPct  != null) candidates.push({label: 'CVR',   pct: cvrPct,  p: cvrP});
   if (clkPct  != null) candidates.push({label: 'SEO Clicks (DiD)', pct: clkPct, p: seoP});
   if (impPct  != null) candidates.push({label: 'SEO Impressions (DiD)', pct: impPct, p: seoP});
@@ -965,10 +977,10 @@ function renderAB(name) {
   // not-yet-rendered experiment outer tab, the canvas is briefly 0×0 until layout runs.
   const drawCharts = () => {
     if (daily.length && daily[0].m1uv_ctrl !== undefined) {
-      lineChart(`ch-${sl}-m1uv`, daily, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-m1uv`, daily, 'm1uv_ctrl', 'm1uv_treat', 'M1+VFM/UV ($)');
       lineChart(`ch-${sl}-cvr`,  daily, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
     } else {
-      lineChart(`ch-${sl}-m1uv`, D.raw_filtered_daily, 'ctrl', 'treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-m1uv`, D.raw_filtered_daily, 'ctrl', 'treat', 'M1+VFM/UV ($)');
     }
   };
   if (typeof requestAnimationFrame === 'function') {
@@ -1031,7 +1043,7 @@ function renderCategories(name) {
     const pc = (D.per_category || {})[c];
     if (pc && pc.denominator) { m1Denom = String(pc.denominator).toLowerCase(); break; }
   }
-  const m1RatioLabel = m1Denom === 'udv' ? 'M1/UDV' : 'M1/UV';
+  const m1RatioLabel = m1Denom === 'udv' ? 'M1+VFM/UDV' : 'M1+VFM/UV';
   const denomLabel   = m1Denom.toUpperCase();
   // Per-row deal count: lookup `D.deals_per_l2` honoring AB-side aliases.
   const dealsPerL2 = D.deals_per_l2 || {};
@@ -1074,7 +1086,7 @@ function renderCategories(name) {
     const m1Per = (denom && denom > 0) ? (m1/denom) : null;
     const cvr   = (udv && udv > 0) ? (orders/udv) : null;
     return `<div class="hm-cell" style="text-align:left;font-size:0.72rem;line-height:1.45;padding:8px;background:#fafbfc">
-      <div>M1: <strong>${compactMoney(m1)}</strong></div>
+      <div>M1+VFM: <strong>${compactMoney(m1)}</strong></div>
       <div>${denomLabel}: <strong>${compactNum(denom)}</strong></div>
       <div>${m1RatioLabel}: <strong>${m1Per==null?'n/a':'$'+m1Per.toFixed(3)}</strong></div>
       <div>CVR: <strong>${cvr==null?'n/a':(cvr*100).toFixed(2)+'%'}</strong></div>
@@ -1193,11 +1205,11 @@ function initCatCharts(name, cat) {
   // 280px height, lineChart measures correctly.
   const draw = () => {
     if (filt.length) {
-      lineChart(`ch-${sl}-${cs}-m1uv-f`, filt, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-${cs}-m1uv-f`, filt, 'm1uv_ctrl', 'm1uv_treat', 'M1+VFM/UV ($)');
       lineChart(`ch-${sl}-${cs}-cvr-f`,  filt, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
     }
     if (ovr.length) {
-      lineChart(`ch-${sl}-${cs}-m1uv-o`, ovr, 'm1uv_ctrl', 'm1uv_treat', 'M1/UV ($)');
+      lineChart(`ch-${sl}-${cs}-m1uv-o`, ovr, 'm1uv_ctrl', 'm1uv_treat', 'M1+VFM/UV ($)');
       lineChart(`ch-${sl}-${cs}-cvr-o`,  ovr, 'cvr_ctrl',  'cvr_treat',  'CVR (orders/UDV)');
     }
   };
@@ -1224,27 +1236,50 @@ function renderSeo(name) {
     root.innerHTML = `<div class="skipped">SEO eval: ${(s && s.status) || 'n/a'}${(s && s.reason) ? ' — ' + s.reason : ''}</div>`;
     return;
   }
-  const b64 = s.upstream_html_b64;
-  if (!b64) {
+  const b64gz = s.upstream_html_b64_gz;
+  const b64plain = s.upstream_html_b64;
+  if (!b64gz && !b64plain) {
     root.innerHTML = `<div class="skipped">SEO upstream HTML missing from <code>seo_${sl}.json</code> — re-run <code>run-seo-evaluation</code> against upstream commit 3100dc8 or later.</div>`;
     return;
   }
-  // Decode base64 to string. Use TextDecoder for non-ASCII safety.
-  let html;
-  try {
-    const raw = atob(b64);
+  // Show a brief loading state — gzip decompression of large reports can take a
+  // few hundred ms in the browser; better than a blank tab while it spins.
+  root.innerHTML = '<p class="muted" style="padding:14px">Decompressing SEO report…</p>';
+  decodeUpstreamHtml(b64gz, b64plain)
+    .then(html => mountSeoIframe(root, html, name, s))
+    .catch(err => {
+      root.innerHTML = `<div class="skipped">SEO upstream HTML failed to decode: ${err && err.message ? err.message : err}</div>`;
+    });
+}
+
+// Decode the upstream SEO HTML. Prefers the gzip+base64 field (introduced 2026-05-06
+// to keep the combined report small enough to email as a single file) and falls back
+// to plain base64 for older payloads. Uses native DecompressionStream — supported in
+// Chrome/Edge/Safari/Firefox 113+ — no JS lib required. Returns a Promise<string>.
+function decodeUpstreamHtml(b64gz, b64plain) {
+  if (b64gz) {
+    if (typeof DecompressionStream !== 'function') {
+      return Promise.reject(new Error('Browser missing DecompressionStream support — please use Chrome 80+ / Firefox 113+ / Safari 16.4+ / Edge 80+.'));
+    }
+    const raw = atob(b64gz);
     const bytes = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    html = new TextDecoder('utf-8').decode(bytes);
-  } catch (err) {
-    root.innerHTML = `<div class="skipped">SEO upstream HTML failed to decode: ${err && err.message ? err.message : err}</div>`;
-    return;
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(stream).text();
   }
-  // Sandboxed srcdoc iframe gives the upstream report its own document context —
-  // no Chart.js double-init, no CSS / DOM-id collisions across experiments, no
-  // cross-frame script access. allow-same-origin is required for upstream's
-  // JSON-from-script tag pattern; allow-scripts is required so its Chart.js
-  // and tab-switching logic actually run.
+  // Fallback: plain base64 (legacy payloads).
+  const raw = atob(b64plain);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return Promise.resolve(new TextDecoder('utf-8').decode(bytes));
+}
+
+// Mount the decoded upstream HTML into a sandboxed srcdoc iframe + render the
+// caveats banner above it. Sandbox flags: allow-same-origin needed for upstream's
+// JSON-from-script tag pattern; allow-scripts needed for its Chart.js + tab
+// switching to run. srcdoc gives the upstream report its own document context —
+// no Chart.js double-init, no CSS / DOM-id collisions across experiments.
+function mountSeoIframe(root, html, name, s) {
   const iframe = document.createElement('iframe');
   iframe.setAttribute('sandbox', 'allow-same-origin allow-scripts');
   iframe.setAttribute('srcdoc', html);
@@ -1252,7 +1287,6 @@ function renderSeo(name) {
   iframe.title = `Upstream SEO report — ${name}`;
   root.innerHTML = '';
   root.appendChild(iframe);
-  // Caveats banner above the iframe so they're visible without scrolling into the upstream report.
   const caveats = (s.caveats || []).filter(Boolean);
   if (caveats.length) {
     const banner = document.createElement('div');

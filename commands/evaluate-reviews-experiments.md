@@ -32,7 +32,7 @@ If either is missing, stop and tell the user to install it first.
 
 ## Step 4: Execute the workflow
 
-Run the steps from `orchestrator-workflow/SKILL.md`. Use Task tool with `subagent_type=general-purpose` and `model=sonnet` to fan out the per-experiment evaluators in parallel. Cap concurrency at ~6 simultaneous subagents.
+Run the steps from `orchestrator-workflow/SKILL.md`. Use Task tool with `subagent_type=general-purpose` and `model=opus` to fan out the per-experiment evaluators in parallel. Cap concurrency at ~6 simultaneous subagents. (Opus is the canonical model for orchestrator subagents — keeps verdict reasoning, narrative synthesis, and SRM-remediation branching consistent with the main orchestrator context.)
 
 ## Step 5: Surface the result
 
