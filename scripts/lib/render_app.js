@@ -76,14 +76,16 @@ function seoScopeTotals(D) {
 }
 
 // Compose the full scope subtitle (deals · window · days · UVs · M1 · impressions ·
-// clicks). Returns an HTML string with two-line layout: line 1 is scope, line 2 is
-// scale metrics. Used in both the Exec Summary card and the Scorecard so a viewer
-// gets the same context regardless of which surface they're looking at.
+// clicks). Returns an HTML string with single-line layout so all context (scope +
+// scale) sits in one row beneath the experiment name. Previously rendered as two
+// lines (scope, then a smaller-grey "scale" line); user requested consolidation.
+// Used in both the Exec Summary card and the Scorecard so a viewer gets the same
+// context regardless of which surface they're looking at.
 function buildScopeSubtitle(D, opts) {
   const wrapClass = (opts && opts.wrapClass) || 'exp-deals';
-  const line1Parts = [];
-  if (D.n_deals != null) line1Parts.push(`${Number(D.n_deals).toLocaleString()} deals`);
-  if (D.start_date && D.end_date) line1Parts.push(`${D.start_date} → ${D.end_date}`);
+  const parts = [];
+  if (D.n_deals != null) parts.push(`${Number(D.n_deals).toLocaleString()} deals`);
+  if (D.start_date && D.end_date) parts.push(`${D.start_date} → ${D.end_date}`);
   // Days running: prefer the unfiltered (raw.overall) n — that's the count of daily
   // rows the AB stats are actually computed on. Fall back to a date-arithmetic
   // estimate when daily rows aren't loaded.
@@ -93,20 +95,18 @@ function buildScopeSubtitle(D, opts) {
     const ms = (Date.parse(D.end_date) - Date.parse(D.start_date));
     if (!isNaN(ms)) nDays = Math.round(ms / 86400000) + 1;
   }
-  if (nDays != null) line1Parts.push(`${nDays} day${nDays === 1 ? '' : 's'}`);
+  if (nDays != null) parts.push(`${nDays} day${nDays === 1 ? '' : 's'}`);
 
   const ab = abScopeTotals(D);
   const seo = seoScopeTotals(D);
-  const line2Parts = [];
-  if (ab.uv != null) line2Parts.push(`${compactNum(ab.uv)} UVs`);
-  if (ab.m1 != null) line2Parts.push(`${compactMoney(ab.m1)} M1+VFM`);
-  if (seo.imp != null) line2Parts.push(`${compactNum(seo.imp)} impressions`);
-  if (seo.clk != null) line2Parts.push(`${compactNum(seo.clk)} clicks`);
+  if (ab.uv != null) parts.push(`${compactNum(ab.uv)} UVs`);
+  if (ab.m1 != null) parts.push(`${compactMoney(ab.m1)} M1+VFM`);
+  if (seo.imp != null) parts.push(`${compactNum(seo.imp)} impressions`);
+  if (seo.clk != null) parts.push(`${compactNum(seo.clk)} clicks`);
 
-  let html = '';
-  if (line1Parts.length) html += `<div class="${wrapClass}">${line1Parts.join(' · ')}</div>`;
-  if (line2Parts.length) html += `<div class="${wrapClass} ${wrapClass}-scale">${line2Parts.join(' · ')}</div>`;
-  return html;
+  return parts.length
+    ? `<div class="${wrapClass}">${parts.join(' · ')}</div>`
+    : '';
 }
 
 function colorFor(pct) {
@@ -323,6 +323,31 @@ function renderExecSummary() {
   root.innerHTML = `<div class="exec-overview">${tally}</div><div class="exec-cards">${cards}</div>`;
 }
 
+// AB data-source / SRM badge. Three states:
+//   - "DATA: ORIGINAL"    — raw bcookie SRM passed; headline numbers come from raw cohort.
+//   - "DATA: REMEDIATED"  — raw SRM failed BUT active_visitor remediation passed; headline
+//                           numbers were swapped to the remediated view, so the reader
+//                           should know the displayed AB metrics aren't from the full pop.
+//   - "SRM FAIL"          — neither passed; headline numbers should be read with caution.
+// Prefers AB-Overall SRM since the exec card's AB metrics come from raw.overall.
+function dataSourceBadge(D) {
+  const srmObj = (D.srm_overall && Object.keys(D.srm_overall).length)
+    ? D.srm_overall
+    : (D.srm_filtered || {});
+  if (!srmObj || !Object.keys(srmObj).length) return '';
+  const promoted = srmObj.promoted_from === 'remediated';
+  const verdict = srmObj.verdict || 'pass';
+  const p = srmObj.p_value;
+  const pStr = (p != null && !isNaN(p)) ? ` (chi² p=${fmtP(p)})` : '';
+  if (promoted) {
+    return `<span class="badge badge-prelim badge-tip" title="raw bcookie SRM failed; metrics shown use the active_visitor-remediated cohort${pStr}">DATA: REMEDIATED</span>`;
+  }
+  if (verdict !== 'pass') {
+    return `<span class="badge badge-fail badge-tip" title="SRM ${verdict}${pStr} — no remediation rescued the split; numbers may be biased">SRM FAIL</span>`;
+  }
+  return `<span class="badge badge-final badge-tip" title="raw bcookie SRM passed${pStr} — metrics shown use the unmodified cohort">DATA: ORIGINAL</span>`;
+}
+
 // Per-experiment exec card. Pulls the same headline values the scorecard uses
 // (unfiltered / population-wide AB metrics + SEO DiD vs synthetic peer + composed funnel).
 function buildExecCard(name, D) {
@@ -339,6 +364,23 @@ function buildExecCard(name, D) {
   const impPct  = (did.did_impressions_pct == null) ? null : did.did_impressions_pct;
   const seoP    = power.p_value;
   const totalPct = expectedFunnelTotal(clkPct, m1uvPct);
+
+  // SEO status: 'ok' = pipeline ran; 'no_urls'/'failed' surface as a single
+  // status pill. Signal strength label (PRELIMINARY/FINAL) is shown as a badge
+  // AND in a descriptive caption below the header. Sources:
+  // `seo.overall.signal_strength` ('full' ≥28 post-days → FINAL, 'partial' <28 →
+  // PRELIMINARY), `seo.overall.effective_post_days`, and
+  // `seo.power_analysis.current_power`.
+  const seoStatusRaw = D.seo && D.seo.status;
+  const seoOk = seoStatusRaw === 'ok';
+  const seoVerdict = seoOk ? (((D.seo && D.seo.verdict) || '?') + '').toUpperCase() : null;
+  const seoOverall = (D.seo && D.seo.overall) || {};
+  const seoSig = seoOverall.signal_strength;
+  const seoPostDays = seoOverall.effective_post_days;
+  const seoPower = (D.seo && D.seo.power_analysis && D.seo.power_analysis.current_power);
+  const seoLabel = seoSig === 'full' ? 'FINAL' : seoSig === 'partial' ? 'PRELIMINARY' : null;
+  const seoLabelBadgeCls = seoLabel === 'FINAL' ? 'badge-final' : 'badge-prelim';
+  const seoVerdictBadgeCls = verdictBadgeCls(seoVerdict);
 
   const verdictCardCls = verdict === 'SHIP' ? 'exec-ship' : verdict === 'KILL' ? 'exec-kill' : 'exec-other';
   const verdictBadgeCls2 = verdict === 'SHIP' ? 'badge-verdict-ship' : verdict === 'KILL' ? 'badge-verdict-kill' : 'badge-verdict-neutral';
@@ -369,12 +411,60 @@ function buildExecCard(name, D) {
   const expName = D.alternate_name || name;
   const takeawayHtml = renderExecTakeaway(D);
 
+  // Header badges: two side-by-side verdict groups (AB + SEO) so the reader sees
+  // BOTH verdicts AND BOTH preliminary/final states at a glance. Previously only
+  // the AB pair was shown, so SEO PRELIMINARY/INCONCLUSIVE state was invisible
+  // in the exec view (only buried in the analyst scorecard below).
+  //
+  // AB data-source badge: shows whether the displayed metrics use the raw bcookie
+  // cohort or the active_visitor-remediated one. Always visible so the reader
+  // knows which dataset the headline numbers came from. Prefers AB-Overall SRM
+  // since the headline M1/UV / CVR are sourced from overall too.
+  const abDataSource = dataSourceBadge(D);
+  const abGroupHtml = `
+    <div class="exec-verdict-group">
+      <span class="exec-verdict-label">AB</span>
+      <span class="badge ${labelBadgeCls}">${escapeText(D.ab_label || '?')}</span>
+      <span class="badge ${verdictBadgeCls2}">${verdict || '?'}</span>
+      ${abDataSource}
+    </div>`;
+  // SEO group: single-row layout. PRELIMINARY/FINAL badge + verdict badge +
+  // inline meta (post-days, power). The verbose caption beneath the header
+  // ("PARTIAL SIGNAL — N post-period days...") is folded into this row so the
+  // entire AB+SEO summary lives on one line under the experiment name.
+  const seoPowerPct = (seoPower != null && !isNaN(seoPower))
+    ? `${Math.round(seoPower * 100)}%` : null;
+  let seoGroupHtml = '';
+  if (seoOk) {
+    const seoLabelBadge = seoLabel
+      ? `<span class="badge ${seoLabelBadgeCls}">${seoLabel}</span>`
+      : '';
+    const postDaysMeta = seoPostDays != null
+      ? `<span class="exec-verdict-meta">${seoPostDays}/28 post-days</span>` : '';
+    const powerMeta = seoPowerPct
+      ? `<span class="exec-verdict-meta">power ${seoPowerPct}</span>` : '';
+    seoGroupHtml = `
+      <div class="exec-verdict-group">
+        <span class="exec-verdict-label">SEO</span>
+        ${seoLabelBadge}
+        <span class="badge ${seoVerdictBadgeCls}">${seoVerdict}</span>
+        ${postDaysMeta}
+        ${powerMeta}
+      </div>`;
+  } else if (D.seo) {
+    seoGroupHtml = `
+      <div class="exec-verdict-group">
+        <span class="exec-verdict-label">SEO</span>
+        <span class="badge badge-prelim">${escapeText(seoStatusRaw || 'unknown')}</span>
+      </div>`;
+  }
+
   return `<div class="exec-card ${verdictCardCls}">
     <div class="exec-card-header">
       <div class="exec-card-name">${escapeText(expName)}</div>
       <div class="exec-card-badges">
-        <span class="badge ${labelBadgeCls}">${escapeText(D.ab_label || '?')}</span>
-        <span class="badge ${verdictBadgeCls2}">${verdict || '?'}</span>
+        ${abGroupHtml}
+        ${seoGroupHtml}
       </div>
     </div>
     ${subtitleHtml}
@@ -483,9 +573,31 @@ function renderExecTakeaway(D) {
 //   6. Synthesized sentence from headline metrics (last resort, when no docx loaded)
 function execTakeaway(D) {
   const n = D.evaluation_narrative || {};
+  // Extract the first complete sentence from narrative prose. Original regex
+  // (`/^[^.!?]+[.!?]/`) stopped at ANY period, which truncated decimals
+  // ("Cohen's d = 0.042" → "Cohen's d = 0") and money ("$2.45 difference" → "$2")
+  // mid-token, producing unfinished sentences in the Exec Summary "Why" row.
+  // Current rule:
+  //   - Period/!/? must be followed by whitespace or end-of-string (skips decimals,
+  //     "$2.45", "p=0.001", "v4.0" — those have digits after the dot, no space).
+  //   - Require ≥25 chars before the break to avoid stopping on short abbreviations
+  //     at sentence start ("vs.", "U.S.", "Mr.").
+  //   - If the next non-whitespace character is lowercase, treat the period as
+  //     mid-sentence abbreviation ("vs. control" → keep going) and continue scanning.
   const firstSentence = (s) => {
-    const m = String(s || '').match(/^[^.!?]+[.!?]/);
-    return (m ? m[0] : String(s || '').slice(0, 220)).trim();
+    const str = String(s || '').trim();
+    if (!str) return '';
+    const MIN_LEN = 25;
+    const re = /[.!?](?=\s+\S|\s*$)/g;
+    let m;
+    while ((m = re.exec(str)) !== null) {
+      const end = m.index + 1;
+      if (end < MIN_LEN) continue;
+      const after = str.slice(end).match(/^\s+(\S)/);
+      if (after && /[a-z]/.test(after[1])) continue;
+      return str.slice(0, end).trim();
+    }
+    return str.length > 240 ? str.slice(0, 237).trim() + '…' : str;
   };
   if (n.what_the_data_shows && n.what_the_data_shows.length) {
     return firstSentence(n.what_the_data_shows[0].text);
@@ -724,6 +836,11 @@ function expBody(name) {
     </div>` : ''}
     <div class="sub-content" data-sub="ab" style="${SHOW_OVERVIEW_TAB ? 'display:none;' : ''}padding-top:18px">
       <h3 style="margin-bottom:8px">${D.alternate_name||name} — AB experiment</h3>
+      <div style="margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <span class="badge ${(D.ab_label||'').startsWith('FINAL') ? 'badge-final' : 'badge-prelim'}">${escapeText(D.ab_label||'?')}</span>
+        <span class="badge ${verdictBadgeCls(D.ab_filtered_verdict)}">${(D.ab_filtered_verdict||'?').toUpperCase()}</span>
+        ${dataSourceBadge(D)}
+      </div>
       <p class="muted" style="margin-bottom:12px">Window: ${D.start_date} → ${D.end_date}. AB-Filtered metrics shown over time.</p>
       <div id="rationale-${sl}"></div>
       <div class="chart-grid-2">

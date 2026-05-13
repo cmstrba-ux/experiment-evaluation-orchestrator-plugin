@@ -1,3 +1,19 @@
+0.6.4 — Exec-summary UI polish + GrowthBook variant-naming guard:
+  - scripts/lib/render_app.js, scripts/lib/render.py — exec-card overhaul: dual AB+SEO verdict groups
+    in the per-experiment header with PRELIMINARY/FINAL labels for both; SEO post-days and power
+    meta inline (e.g. "8/28 post-days · power 100%"); scope subtitle collapsed from two lines to
+    one row; DATA: ORIGINAL / REMEDIATED / SRM FAIL badge on both exec card AB group and AB tab
+    header; .badge-tip CSS (dotted underline + ⓘ glyph) so users see the tooltip affordance.
+  - scripts/lib/render_app.js — fixed firstSentence regex truncating at decimals (was
+    `/^[^.!?]+[.!?]/`, now `/[.!?](?=\s+\S|\s*$)/g` with min-length + lowercase-next-word guards).
+  - scripts/lib/render.py — auto-detects `passthrough/<alternate_name>.docx` files so c3
+    narratives surface even when the AB subagent did not write `passthrough_docx` into JSON.
+  - skills/run-ab-evaluation/SKILL.md — added a hard contract block on GrowthBook true/false
+    variants: ctrl MUST be `"true"`, with a mandatory one-line sanity check in subagent output
+    (recurring inversion bug, last observed on FAQ reviews 2026-05-12 — sign-flipped −1.78% vs the
+    canonical +1.78%).
+  - README.md — generalized for publication (removed internal-only references).
+
 0.6.3 — Robustness fixes from /evaluate-reviews-experiments run (2026-05-11 night):
   - skills/resolve-deal-urls/SKILL.md — mandates `--max_rows=500000` (was unset → bq CLI default
     silently truncated). Added truncation-detection rule: after writing the JSON, count entries vs

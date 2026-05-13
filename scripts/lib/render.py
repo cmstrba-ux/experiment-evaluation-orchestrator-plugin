@@ -797,14 +797,30 @@ def load_run(run_dir: Path):
     for p in sorted(raw.glob("ab_*.json")):
         name = p.stem[len("ab_"):]
         ab = adapt_ab(json.loads(p.read_text(encoding="utf-8")))
-        # Pull the evaluator-written narrative from the passthrough .docx. AB JSON carries
-        # a `passthrough_docx` path; if present and python-docx is installed, we surface
-        # the Executive Summary + Final Recommendation sections in the Overview rationale.
+        # Pull the evaluator-written narrative from the passthrough .docx.
+        # Preferred: AB JSON's explicit `passthrough_docx` path.
+        # Fallback: scan <run_dir>/passthrough/ for a docx whose stem matches the
+        # alternate_name. This covers the common case where the AB subagent's c3
+        # passthrough succeeded (docx exists on disk) but the JSON wasn't updated
+        # with the path — previously the narrative silently dropped to synthesized.
         docx_path = (ab or {}).get("passthrough_docx")
+        if not docx_path:
+            alt = (ab or {}).get("alternate_name") or name
+            passthrough_dir = run_dir / "passthrough"
+            if passthrough_dir.is_dir():
+                candidates = [
+                    passthrough_dir / f"{alt}.docx",
+                    passthrough_dir / f"{name}.docx",
+                ]
+                for cand in candidates:
+                    if cand.is_file():
+                        docx_path = str(cand)
+                        break
         if docx_path:
             narrative = _extract_docx_narrative(docx_path)
             if narrative:
                 ab["evaluation_narrative"] = narrative
+                ab["passthrough_docx"] = docx_path
         experiments[name] = {"ab": ab}
     # Only pick up filenames that match `seo_<safe_alt>.json` for known experiments.
     # Skip intermediate files like seo_did_l2.json that orchestrator may write alongside.
@@ -1019,6 +1035,11 @@ def build_payload(name, exp, run_id, data_through):
             "verdict": seo.get("verdict"),
             "did_coherence": seo.get("did_coherence"),
             "did": seo.get("did") or {},
+            # `overall` carries signal_strength + effective_post_days that the
+            # exec-summary card uses to label SEO as PRELIMINARY/FINAL and surface
+            # the N/28 post-days meta. Top-level `signal_level` is typically null,
+            # so the exec card falls back to `overall.signal_strength`.
+            "overall": seo.get("overall") or {},
             "power_analysis": seo.get("power_analysis") or {},
             "summary_tables": seo.get("summary_tables") or {},
             "by_category_l1": seo.get("by_category_l1") or [],
@@ -1078,6 +1099,11 @@ header .hdr-meta .stat:first-child { border-left:0; padding-left:0; }
 .badge-neutral { background:#edf2f7; color:#4a5568; }
 .badge-pass { background:#e6f4ea; color:#1e4d2b; }
 .badge-fail { background:#fed7d7; color:#742a2a; }
+/* Tooltip hint — applied to badges that have a `title=` attribute so the reader
+   sees there's more info on hover. Dotted bottom border + help cursor + a small
+   ⓘ glyph after the text. Without this the title=tooltip was invisible. */
+.badge-tip { cursor:help; position:relative; padding-right:18px; box-shadow:inset 0 -1px 0 0 currentColor; }
+.badge-tip::after { content:"\01F6C8"; position:absolute; right:5px; top:50%; transform:translateY(-50%); font-size:0.78rem; opacity:0.75; line-height:1; }
 .tabs { display:flex; gap:0; flex-wrap:wrap; border-bottom:2px solid var(--border); }
 .tab-btn { padding:10px 22px; background:#edf2f7; border:1px solid var(--border); border-bottom:none; cursor:pointer; font-weight:600; font-size:0.95rem; }
 .tab-btn.active { background:var(--card); border-bottom:2px solid var(--card); margin-bottom:-2px; color:#2b6cb0; }
@@ -1159,6 +1185,9 @@ td.label,th.label { text-align:left; }
 .exec-card-tiles { display:grid; grid-template-columns:repeat(5, 1fr); gap:10px; }
 @media (max-width:1100px) { .exec-card-tiles { grid-template-columns:repeat(3, 1fr); } }
 @media (max-width:760px) { .exec-card-tiles { grid-template-columns:repeat(2, 1fr); } }
+.exec-verdict-group { display:inline-flex; align-items:center; gap:5px; padding:4px 8px; background:#fafbfc; border:1px solid var(--border); border-radius:10px; flex-wrap:wrap; }
+.exec-verdict-label { font-size:0.68rem; text-transform:uppercase; letter-spacing:0.7px; color:var(--muted); font-weight:700; padding-right:2px; }
+.exec-verdict-meta { font-size:0.74rem; color:var(--muted); padding-left:6px; margin-left:2px; border-left:1px dashed var(--border); white-space:nowrap; }
 .exec-tile { background:var(--bg); border-radius:6px; padding:11px 13px; border-left:3px solid var(--border); }
 .exec-tile.pos { border-left-color:var(--green); background:#f0fff4; }
 .exec-tile.neg { border-left-color:var(--red); background:#fff5f5; }

@@ -102,6 +102,11 @@ When you assign which variant is control vs. treatment from `variantname` values
 
 The `true`/`false` rule reflects how Groupon GrowthBook flags are wired: `true` = original/no-flag-active = control; `false` = override/feature-active = treatment. A naive alphabetic assignment would invert this and flip the sign of every reported delta. Always emit `stats.ctrl_name` and `stats.treat_name` so the renderer can verify the assignment.
 
+⚠️ **DO NOT DEFAULT TO ALPHABETIC for true/false variants.** This has recurred multiple times — most recently 2026-05-12 on FAQ reviews, where the subagent reported %Δ M1+VFM/UV = −1.78% when the canonical convention gives +1.78%. The data was identical; only the sign was wrong. Self-check before emitting JSON:
+1. If observed variants include both `"true"` and `"false"`: ctrl_name MUST be `"true"`.
+2. Print a one-line sanity check in your summary: `"ctrl=true (M1/UV=X.XX), treat=false (M1/UV=Y.YY) → %Δ=+/-Z%"` so the orchestrator can spot inversions.
+3. If `stats.ctrl_name` ends up `"false"` (because you sorted alphabetically), STOP and re-pivot before writing the JSON.
+
 When SRM fails on the raw view AND remediated SRM passes, the renderer will automatically promote the remediated view (active_visitor_flag='Y') to be the primary `raw` block in the rendered scoreboard and HTML — keep emitting both views so this swap is possible. The original raw view is preserved under `raw_pre_remediation` for traceability, and the renderer surfaces both verdicts as `raw fail → active_visitor pass` so the SRM contamination remains visible.
 
 ## Runway / time-to-significance
