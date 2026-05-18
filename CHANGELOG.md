@@ -1,3 +1,10 @@
+0.7.4 — SEO too-early copy tightened:
+  - Tile val: "TOO EARLY BEFORE PRELIMINARY RESULTS" → "TOO EARLY" (back to the
+    short, scannable form; the longer phrasing was hard to read at tile size).
+  - Tile sub-line: "X/14 days needed" → "X/14 to preliminary results" (units
+    are implicit at this point; the destination is what the reader cares about).
+  - SEO header badge + summary.md mirror the same change.
+
 0.7.3 — Copy + maturity-window polish (no behavior change to verdict math):
   - render_app.js / render.py — exec-card and summary.md copy updates:
     * Final verdict row label: "Final" → "Final Recommendation" (column width

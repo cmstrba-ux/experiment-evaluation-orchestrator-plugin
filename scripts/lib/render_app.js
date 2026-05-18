@@ -484,7 +484,7 @@ function buildExecCard(name, D) {
   const tooEarlyTile = (label) => {
     const elapsed = (D.seo_days_elapsed != null) ? D.seo_days_elapsed : 0;
     const total = (D.seo_days_needed_total != null) ? D.seo_days_needed_total : 14;
-    return `<div class="exec-tile neu"><div class="exec-tlabel">${label}</div><div class="exec-tval" style="font-size:0.85rem;">TOO EARLY BEFORE PRELIMINARY RESULTS</div><div class="exec-tp">${elapsed}/${total} days needed</div></div>`;
+    return `<div class="exec-tile neu"><div class="exec-tlabel">${label}</div><div class="exec-tval">TOO EARLY</div><div class="exec-tp">${elapsed}/${total} to preliminary results</div></div>`;
   };
 
   // Two-line subtitle for the exec card: scope (deals · window · days) + scale (UVs ·
@@ -544,8 +544,8 @@ function buildExecCard(name, D) {
     seoGroupHtml = `
       <div class="exec-verdict-group" title="SEO requires ${total} days post-release before a preliminary signal is meaningful">
         <span class="exec-verdict-label">SEO</span>
-        <span class="badge badge-prelim">TOO EARLY BEFORE PRELIMINARY RESULTS</span>
-        <span class="exec-verdict-meta">${elapsed}/${total} days</span>
+        <span class="badge badge-prelim">TOO EARLY</span>
+        <span class="exec-verdict-meta">${elapsed}/${total} to preliminary results</span>
       </div>`;
   } else if (D.seo) {
     seoGroupHtml = `

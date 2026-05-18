@@ -2,6 +2,6 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "experiment-evaluation-orchestrator",
   "description": "Orchestrates AB + SEO experiment evaluation from test_definitions, produces unified Chart.js HTML report. Wraps ab-experiments and seo-impact-plugin.",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "author": { "name": "miro", "email": "c_mstrba@groupon.com" }
 }

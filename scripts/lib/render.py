@@ -1883,8 +1883,8 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
 
         if seo_too_early:
             lines.append(
-                f"  - SEO: **TOO EARLY BEFORE PRELIMINARY RESULTS** — {seo_days_elapsed}/14 "
-                f"days needed (release {eval_seo_since}; data through {data_through})"
+                f"  - SEO: **TOO EARLY** — {seo_days_elapsed}/14 to preliminary results "
+                f"(release {eval_seo_since}; data through {data_through})"
             )
         elif seo.get("status") != "ok":
             seo_msg = seo.get("status") or "n/a"
