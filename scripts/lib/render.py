@@ -1614,7 +1614,7 @@ td.label,th.label { text-align:left; }
 /* Final-row strip rendered ABOVE the tiles (moved out of the takeaway block so the
    bottom-line recommendation is the first thing readers see after the experiment name).
    Mirrors the takeaway Final-row look but stands as a standalone element. */
-.exec-final-strip { display:grid; grid-template-columns:90px 1fr; gap:10px; align-items:center; padding:10px 14px; border-radius:8px; background:#fafbfc; border:1px solid var(--border); border-left-width:4px; }
+.exec-final-strip { display:grid; grid-template-columns:170px 1fr; gap:10px; align-items:center; padding:10px 14px; border-radius:8px; background:#fafbfc; border:1px solid var(--border); border-left-width:4px; }
 .exec-final-strip .exec-tk-label { font-size:0.74rem; font-weight:800; color:var(--text); letter-spacing:0.6px; text-transform:uppercase; }
 .exec-final-strip .exec-final-pill { display:inline-block; font-weight:800; font-size:0.86rem; letter-spacing:0.5px; padding:4px 14px; border-radius:14px; margin-right:10px; vertical-align:middle; }
 .exec-final-strip.final-deploy { border-left-color:var(--green); background:#f0fff4; }
@@ -1652,7 +1652,7 @@ footer { background:#1a202c; color:#a0aec0; text-align:center; padding:20px; fon
 
 <header>
   <div class="container header-row">
-    <h1>Review Experiments evaluation <a class="hdr-rerun-link" href="https://github.com/cmstrba-ux/experiment-evaluation-orchestrator-plugin" target="_blank" rel="noopener" title="Rerun this analysis locally — clone the plugin and run /evaluate-reviews-experiments">↻ Rerun</a></h1>
+    <h1>Review Experiments evaluation <a class="hdr-rerun-link" href="https://github.com/cmstrba-ux/experiment-evaluation-orchestrator-plugin" target="_blank" rel="noopener" title="Clone the plugin and run /evaluate-reviews-experiments locally to reproduce this analysis on your own machine">↓ Download plugin for local execution</a></h1>
     <div id="hdr-meta" class="hdr-meta"></div>
   </div>
 </header>
@@ -1878,13 +1878,13 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
             )
 
         lines.append(f"- **{name}**{header_suffix}")
-        lines.append(f"  - Final: **{composed['verdict']}** — {final_rationale_text}")
+        lines.append(f"  - Final Recommendation: **{composed['verdict']}** — {final_rationale_text}")
         lines.append(f"  - AB: **{ab_verdict}** — {ab_summary}")
 
         if seo_too_early:
             lines.append(
-                f"  - SEO: **TOO EARLY** — {seo_days_elapsed}/14 days needed for preliminary "
-                f"results (release {eval_seo_since}; data through {data_through})"
+                f"  - SEO: **TOO EARLY BEFORE PRELIMINARY RESULTS** — {seo_days_elapsed}/14 "
+                f"days needed (release {eval_seo_since}; data through {data_through})"
             )
         elif seo.get("status") != "ok":
             seo_msg = seo.get("status") or "n/a"
@@ -1898,6 +1898,19 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
             imp_pct = did.get("did_impressions_pct")
             clk_pct = did.get("did_clicks_pct")
             seo_p = power.get("p_value")
+            # SEO maturity in summary.md: 14-28 days post-release is PRELIMINARY at
+            # all costs (mirrors render_app.js). ≥28 days inherits whatever upstream's
+            # signal_strength says (typically FINAL when full signal is reached).
+            mat_chip = ""
+            if seo_days_elapsed is not None:
+                if seo_days_elapsed < 28:
+                    mat_chip = " [PRELIMINARY]"
+                else:
+                    upstream_label = (seo_overall.get("signal_strength") or "").lower()
+                    if upstream_label == "full":
+                        mat_chip = " [FINAL]"
+                    else:
+                        mat_chip = " [PRELIMINARY]"
             parts = []
             if imp_pct is not None:
                 parts.append(f"DiD Impressions {imp_pct:+.2f}%")
@@ -1906,7 +1919,7 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
             if seo_p is not None:
                 parts.append(f"p={seo_p:.3f}")
             seo_summary = ", ".join(parts) if parts else "no DiD computed"
-            lines.append(f"  - SEO: **{seo_verdict}** — {seo_summary}")
+            lines.append(f"  - SEO: **{seo_verdict}**{mat_chip} — {seo_summary}")
 
     lines.extend([
         "",

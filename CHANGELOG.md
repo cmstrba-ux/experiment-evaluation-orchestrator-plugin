@@ -1,3 +1,26 @@
+0.7.3 — Copy + maturity-window polish (no behavior change to verdict math):
+  - render_app.js / render.py — exec-card and summary.md copy updates:
+    * Final verdict row label: "Final" → "Final Recommendation" (column width
+      bumped from 90px → 170px so the longer label doesn't wrap).
+    * SEO too-early text everywhere: "TOO EARLY" → "TOO EARLY BEFORE PRELIMINARY
+      RESULTS" (tile val font reduced to 0.85rem to fit; SEO header badge and
+      summary.md updated to match).
+    * Header link text: "↻ Rerun" → "↓ Download plugin for local execution"
+      (title attr updated; link target unchanged).
+  - render_app.js:buildExecCard — SEO maturity bands enforced AT ALL COSTS:
+    14-28 days post-release is ALWAYS labeled PRELIMINARY in the SEO header
+    badge, regardless of what upstream's `signal_strength` / `effective_post_days`
+    claim. ≥28 days inherits the upstream label. Prevents a 14-27 day signal
+    from showing FINAL just because the synthetic-control DiD scrapes through
+    the upstream "full signal" threshold by coincidence.
+  - render.py:render_summary — SEO line in summary.md gains a `[PRELIMINARY]` /
+    `[FINAL]` chip on the same maturity-band rule, so the markdown summary
+    matches the HTML scoreboard.
+  - skills/orchestrator-workflow/SKILL.md Step 11 — IQ publish title format
+    changed from `Experiment Evaluation YYYY-MM-DD` to `Experiment Evaluation
+    Combined Report — YYYY-MM-DD` (em-dash, matches the previously-used
+    convention before the 0.7.2 simplification).
+
 0.7.2 — Exec-card readability + SEO TOO EARLY treatment + IQ auto-publish:
   - render_app.js:buildExecCard / new buildFinalRow — Final verdict row promoted ABOVE
     the metrics tiles. Bottom-line recommendation is now the first thing readers see

@@ -432,7 +432,18 @@ function buildExecCard(name, D) {
   const seoSig = seoOverall.signal_strength;
   const seoPostDays = seoOverall.effective_post_days;
   const seoPower = (D.seo && D.seo.power_analysis && D.seo.power_analysis.current_power);
-  const seoLabel = seoSig === 'full' ? 'FINAL' : seoSig === 'partial' ? 'PRELIMINARY' : null;
+  // SEO maturity bands:
+  //   < 14 days  → orchestrator skipped dispatch → handled by seo_too_early branch below.
+  //   14-28 days → SEO ran but PRELIMINARY at all costs, regardless of what upstream's
+  //                effective_post_days / signal_strength claim — short windows are too
+  //                noisy to call FINAL even if the synthetic-control DiD reaches the
+  //                upstream "full signal" threshold by some accident.
+  //   ≥ 28 days  → eligible for FINAL when upstream's signal_strength == 'full'.
+  const seoElapsedDays = (D.seo_days_elapsed != null) ? D.seo_days_elapsed : null;
+  let seoLabel = seoSig === 'full' ? 'FINAL' : seoSig === 'partial' ? 'PRELIMINARY' : null;
+  if (seoElapsedDays != null && seoElapsedDays < 28 && seoLabel === 'FINAL') {
+    seoLabel = 'PRELIMINARY';  // 14-28 day window: force PRELIMINARY regardless of upstream.
+  }
   const seoLabelBadgeCls = seoLabel === 'FINAL' ? 'badge-final' : 'badge-prelim';
   const seoVerdictBadgeCls = verdictBadgeCls(seoVerdict);
 
@@ -473,7 +484,7 @@ function buildExecCard(name, D) {
   const tooEarlyTile = (label) => {
     const elapsed = (D.seo_days_elapsed != null) ? D.seo_days_elapsed : 0;
     const total = (D.seo_days_needed_total != null) ? D.seo_days_needed_total : 14;
-    return `<div class="exec-tile neu"><div class="exec-tlabel">${label}</div><div class="exec-tval" style="font-size:0.95rem;">TOO EARLY</div><div class="exec-tp">${elapsed}/${total} days needed</div></div>`;
+    return `<div class="exec-tile neu"><div class="exec-tlabel">${label}</div><div class="exec-tval" style="font-size:0.85rem;">TOO EARLY BEFORE PRELIMINARY RESULTS</div><div class="exec-tp">${elapsed}/${total} days needed</div></div>`;
   };
 
   // Two-line subtitle for the exec card: scope (deals · window · days) + scale (UVs ·
@@ -533,7 +544,7 @@ function buildExecCard(name, D) {
     seoGroupHtml = `
       <div class="exec-verdict-group" title="SEO requires ${total} days post-release before a preliminary signal is meaningful">
         <span class="exec-verdict-label">SEO</span>
-        <span class="badge badge-prelim">TOO EARLY</span>
+        <span class="badge badge-prelim">TOO EARLY BEFORE PRELIMINARY RESULTS</span>
         <span class="exec-verdict-meta">${elapsed}/${total} days</span>
       </div>`;
   } else if (D.seo) {
@@ -600,7 +611,7 @@ function buildFinalRow(D) {
     ? `<span class="exec-final-basis" style="background:#fefcbf;color:#744210;" title="SEO not yet eligible — verdict is AB-only">PRELIMINARY</span>`
     : '';
   return `<div class="exec-final-strip ${finalCls}">
-    <span class="exec-tk-label">Final</span>
+    <span class="exec-tk-label">Final Recommendation</span>
     <span><span class="exec-final-pill">${finalVerdict}</span>${prelimChip}${basisChip}<span class="exec-final-rationale">${escapeText(finalRationale)}</span></span>
   </div>`;
 }
