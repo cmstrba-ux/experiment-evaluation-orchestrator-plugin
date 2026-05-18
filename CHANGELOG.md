@@ -1,3 +1,22 @@
+0.7.5 — Directional KILL guardrail + PRELIMINARY day countdown:
+  - render.py:_compose_final_verdict — third hard guardrail added:
+    `Directional KILL` when M1+VFM/UV ≤ -1% AND CVR ≤ -2% **regardless of
+    p-values or composed CI**. Catches the "very negative point estimate + wide
+    CI that straddles zero" case (e.g., FAQ reviews 8k: M1+VFM/UV -2.36%, CVR
+    -5.41%, 90% CI [-9.65%, +4.93%]) that the CI rule was calling HOLD because
+    the upper bound was inside +0.5% MWSE. New constants:
+    `_GUARDRAIL_DIRECTIONAL_M1UV_PCT = -1.0` and
+    `_GUARDRAIL_DIRECTIONAL_CVR_PCT = -2.0` — both 2x the per-metric noise floor,
+    so a true-zero experiment has low joint-trip probability while a meaningful
+    multi-signal regression flips to KILL even at small sample sizes.
+  - render_app.js:buildExecCard — SEO PRELIMINARY (14-28 day) badge meta text
+    changed from `X/28 post-days` → `X/28 to final results`, mirroring the
+    TOO EARLY badge's `X/14 to preliminary results` pattern. FINAL (≥28 day)
+    keeps the original `X/28 post-days` form (no further countdown is useful
+    after maturity).
+  - render.py:render_summary — summary.md SEO line gains the same day
+    countdown for PRELIMINARY: `[PRELIMINARY — X/28 to final results]`.
+
 0.7.4 — SEO too-early copy tightened:
   - Tile val: "TOO EARLY BEFORE PRELIMINARY RESULTS" → "TOO EARLY" (back to the
     short, scannable form; the longer phrasing was hard to read at tile size).

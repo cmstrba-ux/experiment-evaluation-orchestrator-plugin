@@ -523,8 +523,16 @@ function buildExecCard(name, D) {
     const seoLabelBadge = seoLabel
       ? `<span class="badge ${seoLabelBadgeCls}">${seoLabel}</span>`
       : '';
-    const postDaysMeta = seoPostDays != null
-      ? `<span class="exec-verdict-meta">${seoPostDays}/28 post-days</span>` : '';
+    // Day-counter meta: mirrors the TOO EARLY <14d badge. For PRELIMINARY (14-28
+    // days) show "X/28 to final results" so the reader sees how much runway is
+    // left until the upstream signal_strength flips to 'full'. For FINAL (≥28
+    // days) drop the countdown — it's mature, no further wait gating is useful.
+    let dayMeta = '';
+    if (seoPostDays != null) {
+      dayMeta = (seoLabel === 'PRELIMINARY')
+        ? `<span class="exec-verdict-meta">${seoPostDays}/28 to final results</span>`
+        : `<span class="exec-verdict-meta">${seoPostDays}/28 post-days</span>`;
+    }
     const powerMeta = seoPowerPct
       ? `<span class="exec-verdict-meta">power ${seoPowerPct}</span>` : '';
     seoGroupHtml = `
@@ -532,7 +540,7 @@ function buildExecCard(name, D) {
         <span class="exec-verdict-label">SEO</span>
         ${seoLabelBadge}
         <span class="badge ${seoVerdictBadgeCls}">${seoVerdict}</span>
-        ${postDaysMeta}
+        ${dayMeta}
         ${powerMeta}
       </div>`;
   } else if (D.seo_too_early) {

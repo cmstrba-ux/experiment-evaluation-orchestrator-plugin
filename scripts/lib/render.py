@@ -997,6 +997,16 @@ _DEFAULT_CI_ALPHA = 0.10
 _GUARDRAIL_SEO_IMP_PCT_FULL_SIGNAL = -10.0
 _GUARDRAIL_CVR_NEG_PCT = -1.0
 _GUARDRAIL_CVR_P_THRESH = 0.05
+# Directional KILL guardrail: when BOTH M1+VFM/UV and CVR are meaningfully negative
+# at the same time, KILL regardless of p-values or composed CI. Rationale: with two
+# correlated metrics both pointing materially negative, the probability the true
+# effect is non-negative is small even when individual p-values look high (small-
+# sample noise inflates p). Thresholds are 2x the noise floor on each metric so a
+# true-zero experiment has a low chance of tripping both simultaneously. Catches
+# the "high-variance, all-signals-negative" case that the CI rule misses because
+# the CI is wide enough to straddle zero.
+_GUARDRAIL_DIRECTIONAL_M1UV_PCT = -1.0
+_GUARDRAIL_DIRECTIONAL_CVR_PCT = -2.0
 
 
 def _label_matrix_fallback(ab_verdict, seo_status, seo_verdict):
@@ -1112,6 +1122,23 @@ def _compose_final_verdict(signals, mwse_pct=_DEFAULT_MWSE_PCT, ci_alpha=_DEFAUL
         guardrail_trip = (
             f"SEO impressions DiD {_fmt_pct(did_imp_pct)} at full signal trips the "
             f"organic-ranking-risk floor of {_GUARDRAIL_SEO_IMP_PCT_FULL_SIGNAL:.0f}%."
+        )
+    # Directional KILL: M1+VFM/UV AND CVR both meaningfully negative. Doesn't
+    # require statistical significance because the joint occurrence is itself
+    # the signal — small-sample noise rarely flips both metrics negative past
+    # their respective noise floors at the same time. Catches the
+    # "very negative point estimate + wide CI that straddles zero" case where
+    # the CI rule says HOLD but every visible indicator says ship-this-and-lose-money.
+    if (guardrail_trip is None
+            and m1uv_pct is not None
+            and cvr_pct is not None
+            and m1uv_pct <= _GUARDRAIL_DIRECTIONAL_M1UV_PCT
+            and cvr_pct <= _GUARDRAIL_DIRECTIONAL_CVR_PCT):
+        guardrail_trip = (
+            f"Directional KILL — M1+VFM/UV {_fmt_pct(m1uv_pct)} AND CVR {_fmt_pct(cvr_pct)}; "
+            f"both metrics past their negative noise floors ({_GUARDRAIL_DIRECTIONAL_M1UV_PCT:.1f}% / "
+            f"{_GUARDRAIL_DIRECTIONAL_CVR_PCT:.1f}%). Joint negative direction makes a true-zero "
+            f"effect implausible, so the wide CI doesn't rescue this from KILL."
         )
 
     # --- 2. Recover SEs --------------------------------------------------------
@@ -1901,16 +1928,18 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
             # SEO maturity in summary.md: 14-28 days post-release is PRELIMINARY at
             # all costs (mirrors render_app.js). ≥28 days inherits whatever upstream's
             # signal_strength says (typically FINAL when full signal is reached).
+            # When PRELIMINARY, append the day countdown ("X/28 to final results") so
+            # the markdown matches the HTML scoreboard's badge meta.
             mat_chip = ""
             if seo_days_elapsed is not None:
                 if seo_days_elapsed < 28:
-                    mat_chip = " [PRELIMINARY]"
+                    mat_chip = f" [PRELIMINARY — {seo_days_elapsed}/28 to final results]"
                 else:
                     upstream_label = (seo_overall.get("signal_strength") or "").lower()
                     if upstream_label == "full":
                         mat_chip = " [FINAL]"
                     else:
-                        mat_chip = " [PRELIMINARY]"
+                        mat_chip = f" [PRELIMINARY — {seo_days_elapsed}/28 to final results]"
             parts = []
             if imp_pct is not None:
                 parts.append(f"DiD Impressions {imp_pct:+.2f}%")
