@@ -25,10 +25,19 @@ Inputs the skill needs from this command:
 
 ## Step 3: Verify dependencies before doing real work
 
-Before any BQ query or subagent dispatch, confirm both dependency plugins are loaded:
-- `ab-experiments` (look for `~/.claude/plugins/cache/miro-personal/ab-experiments/` — must contain a versioned subfolder with `skills/ab-experiment-evaluation-c3/SKILL.md`).
-- `seo-impact-plugin` (look at `~/.claude/plugins/local-marketplaces/miro-personal/plugins/seo-impact-plugin/skills/`).
-If either is missing, stop and tell the user to install it first.
+Before any BQ query or subagent dispatch, confirm both dependency plugins are installed by reading the canonical plugin registry at `~/.claude/plugins/installed_plugins.json`:
+
+```bash
+python -c "import json, sys; r=json.load(open(r'C:\\Users\\miro\\.claude\\plugins\\installed_plugins.json')); plugs=r.get('plugins') or {}; missing=[n for n in ('ab-experiments','seo-impact-plugin') if not any(k.startswith(n+'@') for k in plugs)]; sys.exit('Missing: '+', '.join(missing) if missing else 0)"
+```
+
+The registry stores the actual `installPath` for each installed plugin regardless of how it was sourced (local marketplace `./...` path, remote `url:`, or `github:`). Do NOT hard-code paths like `~/.claude/plugins/cache/...` or `~/.claude/plugins/local-marketplaces/...` — the cache uses SHA-bearing folder names that change on every upstream refresh, and local marketplaces only host plugins with `source: "./..."`. The registry is the one stable lookup.
+
+If either plugin is missing from the registry, stop and tell the user to install it first:
+- `ab-experiments`: `/plugin install ab-experiments@miro-personal`
+- `seo-impact-plugin`: `/plugin install seo-impact-plugin@miro-personal`
+
+(The orchestrator's own `scripts/run_seo_pipeline.py` resolves the seo-impact-plugin path the same way — reads `installed_plugins.json` first, falls back to a cache glob only if the registry is unavailable.)
 
 ## Step 4: Execute the workflow
 

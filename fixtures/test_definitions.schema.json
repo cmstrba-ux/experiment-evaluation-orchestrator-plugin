@@ -26,6 +26,12 @@
   {
     "maxLength": "9223372036854775807",
     "mode": "REQUIRED",
+    "name": "evaluate_seo_since",
+    "type": "STRING"
+  },
+  {
+    "maxLength": "9223372036854775807",
+    "mode": "REQUIRED",
     "name": "use_deal_category_split",
     "type": "STRING"
   },

@@ -7,7 +7,7 @@ description: Deterministic shim that shells out to scripts/run_seo_pipeline.py t
 
 ## Inputs
 - `alternate_name`
-- `start_date` (used as the SEO `release_date`)
+- `release_date` — sourced from `test_definitions.evaluate_seo_since` (the queue field of the same name). The orchestrator falls back to `start_date` when `evaluate_seo_since` is blank/null in the source row (handled in `bq_queries.list_experiments`), so this skill ALWAYS receives a concrete date. Do not re-substitute `start_date` here.
 - `variant_urls_path`: absolute path to `raw/urls_<alt>.json` produced by `resolve-deal-urls`
 - `out_path`: where to write `raw/seo_<alt>.json`
 - `passthrough_dir`: where to write the upstream HTML/XLSX
@@ -42,7 +42,7 @@ that imports the upstream modules directly. Same inputs → identical outputs.
    python "${CLAUDE_PLUGIN_ROOT}/scripts/run_seo_pipeline.py" \
        --alternate-name "<alternate_name>" \
        --variant-urls "<variant_urls_path>" \
-       --release-date <start_date>  # YYYY-MM-DD \
+       --release-date <release_date>  # YYYY-MM-DD, from queue.evaluate_seo_since \
        --out "<out_path>" \
        --passthrough-dir "<passthrough_dir>"
    ```

@@ -100,6 +100,16 @@ When you assign which variant is control vs. treatment from `variantname` values
 | `{"true", "false"}` | **`true`** | **`false`** |
 | `{"A", "B"}` (or any other pair) | alphabetic first | other |
 
+### Per-experiment overrides (applied at the SQL layer)
+
+Some experiments are renamed mid-flight and need a fixed mapping so old + new naming halves aggregate as one experiment. These are applied **inside `bq_queries.sql`** via a CASE on `experimentname`, so the SQL output already contains the normalized variantname before this skill sees it:
+
+| Experiment | `experimentname` values matched | Pre-rename | Post-rename | What the SQL emits |
+|---|---|---|---|---|
+| FAQ reviews 32228 | `xp-mbnxt-32228-web-faq-reviews-section` (jupiter_hist) + `FAQ reviews` + `FAQ reviews - 8k` (review_experiments_hist / _deal) | `true` / `false` | `control` / `treatment` | `control` / `treatment` |
+
+For FAQ reviews specifically, the observed variants will always be `{"control", "treatment"}` (never the original `{"true","false"}`) — apply the first row of the convention table, not the second. Pass `@ctrl_name='control'` to `deal_top_winners_losers` for this experiment. When adding a new override here, also update the CASE statements in `scripts/lib/bq_queries.sql` (every query that reads `variantname`) — and remember the `experimentname` column carries the alternate_name in `review_experiments_hist` / `review_experiments_deal` but the GrowthBook id in `experiments_jupiter_hist`, so include both forms in the IN list.
+
 The `true`/`false` rule reflects how Groupon GrowthBook flags are wired: `true` = original/no-flag-active = control; `false` = override/feature-active = treatment. A naive alphabetic assignment would invert this and flip the sign of every reported delta. Always emit `stats.ctrl_name` and `stats.treat_name` so the renderer can verify the assignment.
 
 ⚠️ **DO NOT DEFAULT TO ALPHABETIC for true/false variants.** This has recurred multiple times — most recently 2026-05-12 on FAQ reviews, where the subagent reported %Δ M1+VFM/UV = −1.78% when the canonical convention gives +1.78%. The data was identical; only the sign was wrong. Self-check before emitting JSON:

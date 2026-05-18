@@ -3,6 +3,7 @@ from scripts.lib.schema_drift import validate_required_columns
 
 REQUIRED_TEST_DEFS = [
     "alternate_name", "experiment_name", "start_date", "end_date",
+    "evaluate_seo_since",
     "use_deal_category_split", "use_misc_split", "evaluate_automatically",
 ]
 REQUIRED_REVIEW_EXP = [

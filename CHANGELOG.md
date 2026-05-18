@@ -1,3 +1,166 @@
+0.7.2 — Exec-card readability + SEO TOO EARLY treatment + IQ auto-publish:
+  - render_app.js:buildExecCard / new buildFinalRow — Final verdict row promoted ABOVE
+    the metrics tiles. Bottom-line recommendation is now the first thing readers see
+    after the experiment name; Confidence / Why / Action stay below tiles. Was burying
+    the verdict at the bottom of the takeaway block, two scrolls from the metric tiles
+    that justify it.
+  - render.py:build_payload / render_summary — SEO TOO EARLY flag (`seo_too_early`,
+    `seo_days_elapsed`, `seo_days_needed_total=14`) derived from queue.json's
+    `evaluate_seo_since`. When the SEO release date is < 14 days old AND SEO didn't run:
+      * SEO tiles render "TOO EARLY — X/14 days needed" instead of "n/a"
+      * SEO header badge becomes "TOO EARLY  X/14 days" instead of "unknown"
+      * Final verdict pill gains a PRELIMINARY chip ("SEO not yet eligible — verdict is
+        AB-only") so the AB-only composition can't be mistaken for the full picture
+      * summary.md SEO line becomes "TOO EARLY — X/14 days needed for preliminary results"
+    Matches the existing orchestrator-side dispatch gate (skills/list-experiments and
+    orchestrator-workflow already skip SEO when evaluate_seo_since > today-14); the
+    renderer now surfaces that intentional skip instead of falling back to a generic
+    n/a state.
+  - render.py:load_run — reads `<run_dir>/queue.json` (already written by the
+    /evaluate-reviews-experiments command) and joins `evaluate_seo_since` onto each
+    experiment dict by alternate_name. Single source of truth — subagent JSONs don't
+    need a contract change to carry the field.
+  - render.py:HTML_SHELL — header gains an inline "↻ Rerun" pill linking to
+    https://github.com/cmstrba-ux/experiment-evaluation-orchestrator-plugin so any
+    viewer can clone the plugin and rerun the analysis locally. Styled as a translucent
+    pill next to the title; doesn't compete with `hdr-meta` on the right.
+  - skills/orchestrator-workflow/SKILL.md — Step 11 added: publish combined_report.html
+    to Groupon IQ with the canonical title `Experiment Evaluation <YYYY-MM-DD>` where
+    the date is the run_id prefix (the day the orchestrator ran, not data_through —
+    data freshness drifts on reruns even when the analyst's intent is the same
+    publication). No experiment names — versioning is the dedup mechanism. Existing reports with
+    that title are versioned via the /versions endpoint; otherwise create_report +
+    versions. Folder ID dbdf853d-55c8-4780-ad03-35441e5ffc10 ("AI summaries" — the
+    established convention). Skips silently when IQ_API_KEY is missing or --no-publish
+    is set; never fails the run on publish errors.
+
+0.7.1 — Plugin resolution via canonical registry (no more cache-path globbing):
+  - scripts/run_seo_pipeline.py:_find_seo_plugin_root — rewritten to read
+    `~/.claude/plugins/installed_plugins.json` (the canonical Claude Code plugin
+    registry). Every installed plugin records its `installPath` there regardless of
+    how it was sourced — local marketplace `./...` path, remote `url:`, or
+    `github:`. Previous implementation globbed `~/.claude/plugins/cache/*/seo-impact-
+    plugin/*/...` directly, which (a) hard-coded the cache as the storage location
+    and broke if upstream's SHA changed mid-session, (b) silently picked the most
+    recently-modified candidate from a glob (potentially the wrong version), and
+    (c) wouldn't have worked if seo-impact-plugin were ever moved to a local-source
+    layout. New implementation reads the registry, finds any `seo-impact-plugin@*`
+    entry, and verifies the installPath contains the expected scripts. Cache glob
+    is retained as a defensive fallback only — used when the registry is missing
+    or doesn't list the plugin. Smoke-tested: registry resolves to the same path
+    the glob would have found, plus a `compute_verdict` cache-freshness assertion.
+  - commands/evaluate-reviews-experiments.md Step 3 — dependency check rewritten
+    to read `installed_plugins.json` directly via a one-line python snippet that
+    checks for `ab-experiments@*` and `seo-impact-plugin@*` entries. No more
+    hard-coded paths to `cache/...` or `local-marketplaces/...` — the registry is
+    the one stable lookup that works for any plugin source type. Exit code 0 =
+    both present; non-zero with a "Missing: ..." message otherwise.
+
+0.7.0 — Statistical Final verdict: joint AB+SEO CI + hard guardrails (OEC + guardrails pattern):
+  - scripts/lib/stats.py — three new helpers:
+    * `_normal_ppf` (Acklam's algorithm, accurate to ~1e-9, no scipy dependency)
+    * `recover_se_from_p(effect, p_value, p_floor=0.001)` — back out SE from a two-sided
+      p-value via normal-approx with a p-floor clamp so upstream-reported `p=0` produces
+      a conservative finite SE rather than collapsing the CI to a point.
+    * `compose_funnel_ci(m1uv_pct, m1uv_se, clicks_pct, clicks_se, alpha=0.10)` —
+      delta-method 90% CI on the product (1+m1uv)(1+clicks)−1 = Net Margin/Visitor %Δ.
+      Independence-of-effects assumed; documented as a small approximation.
+  - scripts/lib/render.py:_compose_final_verdict — rewritten as a strict 4-stage decision
+    hierarchy: (1) hard guardrails (AB CVR ≤ −1% at p<0.05 → KILL; SEO impressions DiD
+    ≤ −10% at full signal → KILL) — these are vetos independent of the composed metric;
+    (2) SRM persistent-fail short-circuit to label-matrix (composed CI not trusted when
+    the bcookie split is biased); (3) composed funnel 90% CI rule — lower > +0.5%
+    (Minimum Worth-Shipping Effect) → DEPLOY, upper < −0.5% → KILL, straddles → HOLD;
+    (4) label-matrix fallback when SEs aren't recoverable. The 5 tunables — MWSE, CI
+    alpha, guardrail thresholds — are module constants for easy retuning.
+  - scripts/lib/render.py:build_payload + render_summary — emit and read a unified
+    `signals` dict (ab_verdict, m1uv_pct/se/t/n, cvr_pct/p, seo_status/verdict/
+    signal_strength, did_imp_pct, did_clicks_pct/p, srm_verdict). Payload now carries
+    `composed_basis` ('ci' | 'guardrail' | 'matrix'), `composed_net_pct`,
+    `composed_se_pct`, `composed_lower_pct`, `composed_upper_pct`, `composed_alpha`,
+    `composed_mwse_pct` so HTML and Markdown share one source of truth.
+  - scripts/lib/render_app.js — new `ciTile(D)` replaces the legacy "Total estimated
+    margin impact" tile. Headline tile now reads `Net margin / visitor: X.XX% · 90% CI
+    [lower, upper]` with a `CI / guardrail / matrix` basis chip in the label so the
+    reader knows the verdict's rigor at a glance. The Final row in the takeaway block
+    gains the same basis chip next to the verdict pill.
+  - scripts/lib/render.py CSS — `.exec-tile-basis` (basis chip on the headline tile)
+    and `.exec-final-basis` (basis chip on the Final row).
+  - skills/render-combined-report/SKILL.md — full rewrite of the "Composed Final
+    verdict" section: the composed metric definition, SE-recovery priority order,
+    4-stage decision hierarchy, tunable defaults table, worked example reproducing
+    the FAQ reviews case (90% CI [−5.69%, +1.13%] → CI rule says HOLD; guardrail trip
+    forces KILL), and the three honest caveats (independence assumption, p-clamp
+    conservatism, organic-traffic scope).
+  - render_summary methodology section — replaced the label-matrix one-liner with the
+    new CI+guardrails rule statement.
+  - tests/test_stats.py — 16 new tests covering `_normal_ppf` against known quantiles,
+    `recover_se_from_p` (simple case, p-clamp, missing-input handling), `compose_funnel_ci`
+    (none-returns, point-only no-SE, FAQ reviews worked example, clear-DEPLOY and
+    clear-KILL cases), and `_compose_final_verdict` decision hierarchy (each guardrail,
+    each CI branch, matrix fallback, FAQ reviews end-to-end). Pytest: 49 passed.
+
+0.6.6 — Composed AB+SEO Final verdict (DEPLOY / HOLD / KILL) + renderer SRM-backfill list-shape fix:
+  - scripts/lib/render.py — new `_compose_final_verdict()` helper composes a single
+    DEPLOY / HOLD / KILL recommendation from the AB verdict (`raw.filtered.verdict`) and
+    the upstream SEO verdict, plus a 1-2 sentence rationale. Categorizes SEO into
+    WIN (POSITIVE/SHIP) / HARM (PAUSE/NEGATIVE/REDESIGN) / UNCLEAR (INCONCLUSIVE/EXTEND/
+    EARLY/MIXED) / MISSING (no SEO data). Two invariants — AB KILL is dominant; SEO HARM
+    is dominant. Everything else is HOLD. Full rule table lives in
+    `skills/render-combined-report/SKILL.md`.
+  - scripts/lib/render.py — `build_payload` now emits `composed_verdict`,
+    `composed_rationale`, `composed_cls` so the JS-rendered exec card and the
+    `summary.md` scoreboard read from the same source of truth.
+  - scripts/lib/render.py:render_summary — scoreboard line now leads with the Final
+    verdict (`- Final: **KILL** — AB ruled KILL ...`) above AB/SEO lines, and the
+    Methodology section documents the composition rule.
+  - scripts/lib/render_app.js — exec card takeaway block now renders a Final row at
+    the top (pill + rationale, color-coded green/amber/red); exec card left-border now
+    reflects the Final verdict (not AB-only); the top-of-summary tally counts
+    `N deploy · N hold · N kill` instead of the AB-only `ship/kill/other`.
+  - scripts/lib/render.py CSS — added `.exec-takeaway-row.exec-final.final-{deploy,hold,kill}`
+    styles for the new pill + rationale row.
+  - skills/render-combined-report/SKILL.md — documented the composition rule (inputs,
+    SEO categorization, 4×4 verdict matrix, the two invariants, and the rationale-text
+    extension point for new combos).
+  - scripts/lib/render.py:_backfill_remediated_srm — accepts both list-shaped variants
+    (the documented SKILL.md schema: `[{name, role, uv, bcookies, ...}]`) AND legacy
+    dict-shaped variants (`{ctrl: {...}, treat: {...}}`). Falls through `total_uv →
+    bcookies → uv → n` for the SRM denominator. Previously crashed with
+    `AttributeError: 'list' object has no attribute 'get'` on the documented shape,
+    blocking render for runs where the AB subagent followed the schema literally.
+
+0.6.5 — SEO release_date sourced from test_definitions.evaluate_seo_since + FAQ reviews mid-experiment variant rename:
+  - scripts/lib/bq_queries.sql, fixtures/test_definitions.schema.json, skills/list-experiments/SKILL.md
+    — `list_experiments` now projects `evaluate_seo_since` (from the new test_definitions column of
+    the same name) alongside `start_date`/`end_date`. The SQL falls back to `start_date` when the
+    column is blank/null so legacy rows keep working. `seo_eligible` in list-experiments is now
+    gated on `evaluate_seo_since <= today-14` (widened from the previous 7-day cushion on
+    `start_date`), so the upstream SEO pipeline has enough post-period days for a meaningful DiD
+    before the orchestrator opens a run.
+  - skills/orchestrator-workflow/SKILL.md, skills/run-seo-evaluation/SKILL.md — the SEO subagent
+    now receives `release_date = queue.evaluate_seo_since` (instead of `queue.start_date`) and
+    forwards it to `scripts/run_seo_pipeline.py --release-date`. The AB window can begin earlier
+    than the SEO release (e.g. FAQ reviews ran AB from 2026-04-06 but the SEO test variant only
+    went live 2026-05-01).
+  - scripts/lib/bq_queries.sql — added a per-experiment variant-rename CASE to every query that
+    reads `variantname` (9 queries: ab_filtered_raw/remediated, ab_overall_raw/remediated,
+    category_daily base CTE, category_daily_by_l2, overall_per_cat_daily, deal_top_winners_losers
+    per_deal CTE, deal_by_category). For
+    `experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k')`,
+    the pre-rename `true`/`false` variant names are mapped onto the post-rename
+    `control`/`treatment` names so both halves aggregate as one experiment. The IN list covers
+    both the GrowthBook experiment id (used in `experiments_jupiter_hist`) and the alternate_name
+    values (used in `review_experiments_hist`/`review_experiments_deal`). The CASE is a no-op for
+    every other experiment. Verified on 2026-05-13→2026-05-17 jupiter_hist window and the full
+    FAQ reviews deal-table cohort: SQL now emits exactly 2 variants (`control`, `treatment`) with
+    summed UV/UDV/M1 across the old+new naming halves.
+  - skills/run-ab-evaluation/SKILL.md — added a "Per-experiment overrides" subsection under
+    "Variant naming convention". Documents the FAQ reviews rename, tells subagents to pass
+    `@ctrl_name='control'` (the post-rename name) to `deal_top_winners_losers`, and reminds future
+    maintainers that any new override must be applied in the SQL CASE statements as well as the
+    skill table.
+
 0.6.4 — Exec-summary UI polish + GrowthBook variant-naming guard:
   - scripts/lib/render_app.js, scripts/lib/render.py — exec-card overhaul: dual AB+SEO verdict groups
     in the per-experiment header with PRELIMINARY/FINAL labels for both; SEO post-days and power

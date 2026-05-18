@@ -14,7 +14,7 @@ description: Read test_definitions and produce the experiment evaluation queue. 
 
 1. Validate inputs. Refuse if mode is unknown.
 2. Validate schema:
-   - Run `python -c "from scripts.lib.schema_drift import validate_required_columns; validate_required_columns('fixtures/test_definitions.schema.json', ['alternate_name','experiment_name','start_date','end_date','use_deal_category_split','use_misc_split','evaluate_automatically'])"`
+   - Run `python -c "from scripts.lib.schema_drift import validate_required_columns; validate_required_columns('fixtures/test_definitions.schema.json', ['alternate_name','experiment_name','start_date','end_date','evaluate_seo_since','use_deal_category_split','use_misc_split','evaluate_automatically'])"`
    - On failure → fail loudly.
 3. Build the bq command:
    - Read query `list_experiments` from `scripts/lib/bq_queries.sql`.
@@ -22,10 +22,12 @@ description: Read test_definitions and produce the experiment evaluation queue. 
    - Set `--parameter='explicit_name:STRING:<alternate_name>'` if `mode=explicit`, else empty.
    - For `mode=since`, run `auto_only=false, explicit_name=` and post-filter rows in Python.
 4. Run via `bq query --use_legacy_sql=false --format=json --max_rows=500`.
-5. Parse JSON, validate each row has all 8 columns, classify:
+5. Parse JSON, validate each row has all 9 columns, classify:
    - `is_in_flight = (end_date IS NULL OR end_date == '')`
-   - `seo_eligible = (start_date <= today - 7)` — even before checking test_deals; will be re-checked by seo-guardrails
-6. Emit queue as JSON to stdout: `[{"alternate_name":..., "experiment_name":..., "start_date":..., "end_date":..., "use_deal_category_split":..., "use_misc_split":..., "evaluate_automatically":..., "is_in_flight":..., "seo_eligible":...}, ...]`
+   - `seo_eligible = (evaluate_seo_since <= today - 14)` — even before checking test_deals; will be re-checked by seo-guardrails. Uses `evaluate_seo_since` (not `start_date`) because the AB window can begin earlier than the SEO release. The 14-day cushion (vs the previous 7) gives the upstream SEO pipeline enough post-period days for a meaningful DiD before the orchestrator gates a run.
+6. Emit queue as JSON to stdout: `[{"alternate_name":..., "experiment_name":..., "start_date":..., "end_date":..., "evaluate_seo_since":..., "use_deal_category_split":..., "use_misc_split":..., "evaluate_automatically":..., "is_in_flight":..., "seo_eligible":...}, ...]`
+
+`evaluate_seo_since` is the SEO release_date passed to `run-seo-evaluation` (via `--release-date`). It is sourced from `test_definitions.evaluate_seo_since`; when that column is blank/null in the source row, the SQL falls back to `start_date` so legacy rows keep working.
 
 ## Tool contract
 

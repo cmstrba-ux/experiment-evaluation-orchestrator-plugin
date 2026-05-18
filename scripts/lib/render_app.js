@@ -308,16 +308,24 @@ function renderExecSummary() {
   const exps = Object.entries(ROOT.experiments);
   if (!exps.length) { root.innerHTML = '<p class="muted">No experiments to summarize.</p>'; return; }
 
-  // Top-level tally. Counts SHIP / KILL / other (HOLD, INCONCLUSIVE, EXTEND, prelim).
-  const decisions = exps.map(([n, D]) => (D.ab_filtered_verdict || '').toUpperCase());
-  const ships = decisions.filter(v => v === 'SHIP').length;
+  // Top-level tally. Counts the COMPOSED Final verdict (DEPLOY / HOLD / KILL) so the
+  // top-of-report headline answers the same question every exec card answers — what
+  // to do given BOTH the AB and SEO results. Falls back to the AB-only verdict for
+  // older runs that lack `composed_verdict`.
+  const decisions = exps.map(([n, D]) => {
+    const c = String(D.composed_verdict || '').toUpperCase();
+    if (c) return c;
+    const ab = String(D.ab_filtered_verdict || '').toUpperCase();
+    return ab === 'SHIP' ? 'DEPLOY' : ab === 'KILL' ? 'KILL' : 'HOLD';
+  });
+  const deploys = decisions.filter(v => v === 'DEPLOY').length;
   const kills = decisions.filter(v => v === 'KILL').length;
-  const others = exps.length - ships - kills;
+  const holds = exps.length - deploys - kills;
   const tally = `
     <span class="tally"><strong>${exps.length}</strong> experiment${exps.length!==1?'s':''} evaluated</span>
-    <span class="tally"><strong>${ships}</strong> ship</span>
-    <span class="tally"><strong>${kills}</strong> kill</span>
-    <span class="tally"><strong>${others}</strong> other / inconclusive</span>`;
+    <span class="tally"><strong>${deploys}</strong> deploy</span>
+    <span class="tally"><strong>${holds}</strong> hold</span>
+    <span class="tally"><strong>${kills}</strong> kill</span>`;
 
   const cards = exps.map(([n, D]) => buildExecCard(n, D)).join('');
   root.innerHTML = `<div class="exec-overview">${tally}</div><div class="exec-cards">${cards}</div>`;
@@ -346,6 +354,52 @@ function dataSourceBadge(D) {
     return `<span class="badge badge-fail badge-tip" title="SRM ${verdict}${pStr} — no remediation rescued the split; numbers may be biased">SRM FAIL</span>`;
   }
   return `<span class="badge badge-final badge-tip" title="raw bcookie SRM passed${pStr} — metrics shown use the unmodified cohort">DATA: ORIGINAL</span>`;
+}
+
+// Net Margin/Visitor tile — replaces the old "Total estimated margin impact" tile.
+// Shows the composed point estimate and the [lower, upper] CI band when the CI
+// rule is in effect. Falls back to the legacy product-of-pcts display when the
+// payload doesn't carry CI fields (degraded run, missing SEs).
+//
+// CI band coloring follows the verdict rule that uses it:
+//   - lower > +MWSE → pos (green) — significantly positive and material
+//   - upper < -MWSE → neg (red)   — significantly negative
+//   - straddles    → neu (gray)   — HOLD
+// The MWSE comes from the payload so the tile and the verdict can never disagree.
+function ciTile(D) {
+  const basis = D.composed_basis;
+  const point = D.composed_net_pct;
+  const lo = D.composed_lower_pct;
+  const hi = D.composed_upper_pct;
+  const mwse = (D.composed_mwse_pct != null) ? D.composed_mwse_pct : 0.5;
+  const alpha = D.composed_alpha;
+  const ciPct = (alpha != null && !isNaN(alpha)) ? Math.round((1 - alpha) * 100) : 90;
+
+  // Legacy fallback: no point estimate at all — show n/a.
+  if (point == null || isNaN(point)) {
+    return `<div class="exec-tile na"><div class="exec-tlabel">Net margin / visitor</div><div class="exec-tval">n/a</div></div>`;
+  }
+
+  // No CI bounds (basis = 'matrix') — show the point alone with a basis hint so the
+  // reader knows the rigor level dropped.
+  if (lo == null || hi == null || isNaN(lo) || isNaN(hi)) {
+    const cls = point > 0.5 ? 'pos' : point < -0.5 ? 'neg' : 'neu';
+    return `<div class="exec-tile ${cls}">
+      <div class="exec-tlabel">Net margin / visitor <span class="exec-tile-basis" title="No CI — verdict from rule-based matrix">matrix</span></div>
+      <div class="exec-tval">${fmtPctOf(point)}</div>
+      <div class="exec-tp">CI unavailable</div>
+    </div>`;
+  }
+
+  const cls = lo > mwse ? 'pos' : hi < -mwse ? 'neg' : 'neu';
+  const basisHint = basis === 'ci' ? `${ciPct}% CI`
+                   : basis === 'guardrail' ? 'guardrail'
+                   : basis;
+  return `<div class="exec-tile ${cls} sig">
+    <div class="exec-tlabel">Net margin / visitor <span class="exec-tile-basis">${escapeText(basisHint || '')}</span></div>
+    <div class="exec-tval">${fmtPctOf(point)}</div>
+    <div class="exec-tp">${ciPct}% CI [${fmtPctOf(lo)}, ${fmtPctOf(hi)}]</div>
+  </div>`;
 }
 
 // Per-experiment exec card. Pulls the same headline values the scorecard uses
@@ -382,7 +436,15 @@ function buildExecCard(name, D) {
   const seoLabelBadgeCls = seoLabel === 'FINAL' ? 'badge-final' : 'badge-prelim';
   const seoVerdictBadgeCls = verdictBadgeCls(seoVerdict);
 
-  const verdictCardCls = verdict === 'SHIP' ? 'exec-ship' : verdict === 'KILL' ? 'exec-kill' : 'exec-other';
+  // Card left-border color now mirrors the COMPOSED Final verdict (DEPLOY/HOLD/KILL),
+  // not the AB-only verdict. This keeps the visual hierarchy consistent with the
+  // Final row at the top of the takeaway block. Falls back to AB-derived class for
+  // backward compat if `composed_verdict` is absent (older runs).
+  const finalVerdict = String(D.composed_verdict || '').toUpperCase();
+  const verdictCardCls = finalVerdict === 'DEPLOY' ? 'exec-ship'
+    : finalVerdict === 'KILL' ? 'exec-kill'
+    : finalVerdict === 'HOLD' ? 'exec-other'
+    : (verdict === 'SHIP' ? 'exec-ship' : verdict === 'KILL' ? 'exec-kill' : 'exec-other');
   const verdictBadgeCls2 = verdict === 'SHIP' ? 'badge-verdict-ship' : verdict === 'KILL' ? 'badge-verdict-kill' : 'badge-verdict-neutral';
   const labelBadgeCls = (D.ab_label || '').startsWith('FINAL') ? 'badge-final' : 'badge-prelim';
 
@@ -401,6 +463,17 @@ function buildExecCard(name, D) {
       <div class="exec-tval">${fmtPctOf(val)}${star}</div>
       ${pStr}
     </div>`;
+  };
+
+  // SEO TOO EARLY tile — used in place of the n/a tile when the experiment's
+  // SEO release date is set but fewer than 14 days have elapsed. Shows the
+  // day-counter so the reader knows when the next run will include SEO data.
+  // The orchestrator skips SEO dispatch entirely in this window, so the AB-only
+  // composition stands until 14 days mature.
+  const tooEarlyTile = (label) => {
+    const elapsed = (D.seo_days_elapsed != null) ? D.seo_days_elapsed : 0;
+    const total = (D.seo_days_needed_total != null) ? D.seo_days_needed_total : 14;
+    return `<div class="exec-tile neu"><div class="exec-tlabel">${label}</div><div class="exec-tval" style="font-size:0.95rem;">TOO EARLY</div><div class="exec-tp">${elapsed}/${total} days needed</div></div>`;
   };
 
   // Two-line subtitle for the exec card: scope (deals · window · days) + scale (UVs ·
@@ -451,6 +524,18 @@ function buildExecCard(name, D) {
         ${postDaysMeta}
         ${powerMeta}
       </div>`;
+  } else if (D.seo_too_early) {
+    // SEO release < 14 days old: orchestrator intentionally skipped dispatch.
+    // Surface the day-counter in the badge so the reader sees PRELIMINARY state
+    // without needing to read the tile contents.
+    const elapsed = (D.seo_days_elapsed != null) ? D.seo_days_elapsed : 0;
+    const total = (D.seo_days_needed_total != null) ? D.seo_days_needed_total : 14;
+    seoGroupHtml = `
+      <div class="exec-verdict-group" title="SEO requires ${total} days post-release before a preliminary signal is meaningful">
+        <span class="exec-verdict-label">SEO</span>
+        <span class="badge badge-prelim">TOO EARLY</span>
+        <span class="exec-verdict-meta">${elapsed}/${total} days</span>
+      </div>`;
   } else if (D.seo) {
     seoGroupHtml = `
       <div class="exec-verdict-group">
@@ -458,6 +543,18 @@ function buildExecCard(name, D) {
         <span class="badge badge-prelim">${escapeText(seoStatusRaw || 'unknown')}</span>
       </div>`;
   }
+
+  // Final verdict row — moved ABOVE the tiles so the bottom-line recommendation
+  // is the first thing the reader sees after the experiment name. The same
+  // markup used to live inside .exec-takeaway below; relocating it answers the
+  // "what to do" question before "what are the numbers" rather than after.
+  const finalRowHtml = buildFinalRow(D);
+
+  // SEO tile rendering: when the orchestrator skipped SEO because the 14-day
+  // window hasn't matured, show TOO EARLY tiles instead of n/a. Otherwise the
+  // standard tile() handles both the data-present and the no-SEO-data fallback.
+  const seoClicksTile = D.seo_too_early ? tooEarlyTile('SEO Clicks') : tile('SEO Clicks', clkPct, seoP, 1.0);
+  const seoImpTile    = D.seo_too_early ? tooEarlyTile('SEO Impressions') : tile('SEO Impressions', impPct, seoP, 1.0);
 
   return `<div class="exec-card ${verdictCardCls}">
     <div class="exec-card-header">
@@ -468,14 +565,43 @@ function buildExecCard(name, D) {
       </div>
     </div>
     ${subtitleHtml}
+    ${finalRowHtml}
     <div class="exec-card-tiles">
-      ${tile('Total estimated margin impact', totalPct, null, 0.5)}
+      ${ciTile(D)}
       ${tile('M1+VFM/UV %Δ',                  m1uvPct, m1uvP, 0.5)}
       ${tile('CVR %Δ',                        cvrPct,  cvrP,  0.5)}
-      ${tile('SEO Clicks',                    clkPct,  seoP,  1.0)}
-      ${tile('SEO Impressions',               impPct,  seoP,  1.0)}
+      ${seoClicksTile}
+      ${seoImpTile}
     </div>
     ${takeawayHtml}
+  </div>`;
+}
+
+// Build the Final verdict row HTML. Extracted from renderExecTakeaway so the
+// row can be placed ABOVE the tiles (where it belongs as the bottom-line
+// recommendation) while the rest of the takeaway block (Confidence/Why/Action)
+// stays below. Same payload fields, same look — just relocated.
+function buildFinalRow(D) {
+  const finalVerdict = String(D.composed_verdict || '').toUpperCase();
+  if (!finalVerdict) return '';
+  const finalRationale = D.composed_rationale || '';
+  const finalCls = D.composed_cls || '';
+  const finalBasis = D.composed_basis;
+  const basisLabel = finalBasis === 'ci' ? 'CI'
+    : finalBasis === 'guardrail' ? 'guardrail'
+    : finalBasis === 'matrix' ? 'matrix'
+    : '';
+  const basisChip = basisLabel
+    ? `<span class="exec-final-basis" title="Verdict basis: ${escapeText(basisLabel)}">${basisLabel}</span>`
+    : '';
+  // When SEO is too early we overlay a PRELIMINARY tag on the verdict pill so
+  // the reader can't mistake an AB-only composed verdict for the full picture.
+  const prelimChip = D.seo_too_early
+    ? `<span class="exec-final-basis" style="background:#fefcbf;color:#744210;" title="SEO not yet eligible — verdict is AB-only">PRELIMINARY</span>`
+    : '';
+  return `<div class="exec-final-strip ${finalCls}">
+    <span class="exec-tk-label">Final</span>
+    <span><span class="exec-final-pill">${finalVerdict}</span>${prelimChip}${basisChip}<span class="exec-final-rationale">${escapeText(finalRationale)}</span></span>
   </div>`;
 }
 
@@ -554,6 +680,9 @@ function renderExecTakeaway(D) {
   } else {
     actionText = `Verdict ${verdict} — see full evaluation report for context.`;
   }
+
+  // Final verdict moved above the tiles (see buildFinalRow); the takeaway block
+  // now contains only Confidence / Why / Action rows.
 
   return `
     <div class="exec-takeaway">

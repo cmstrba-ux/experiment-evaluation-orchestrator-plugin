@@ -38,25 +38,68 @@ logger = logging.getLogger("run_seo_pipeline")
 
 
 def _find_seo_plugin_root() -> Path:
-    """Locate the installed seo-impact-plugin directory under ~/.claude/plugins/cache/.
+    """Locate the installed seo-impact-plugin via the Claude Code plugin registry.
 
-    Cache layout is `~/.claude/plugins/cache/<marketplace>/seo-impact-plugin/<version>/`,
-    where the inner tree may be flat (scripts/ at the version root) or nested under
-    `plugins/seo-impact-plugin/`. We support both and pick the most recently
-    modified candidate to tolerate stale sibling versions.
+    The canonical mechanism is `~/.claude/plugins/installed_plugins.json` — every
+    installed plugin records its `installPath` there regardless of how it was sourced
+    (local marketplace `./...` path vs remote `url:` / `github:` source). Reading from
+    the registry instead of globbing the cache directory means:
+      - No hard-coded SHA-bearing paths that break when upstream updates;
+      - Works identically for any plugin source type;
+      - Picks up the same installation the host runtime uses.
+
+    Falls back to a cache glob ONLY if the registry can't be read or doesn't list the
+    plugin — that path is retained as a defensive backstop for very old installs that
+    predate the v2 registry, but should not be the primary mechanism.
+
+    The plugin's on-disk layout may be flat (`<root>/scripts/impact_analyzer.py`) or
+    nested under `plugins/seo-impact-plugin/` (the upstream repo's actual structure).
+    Both are supported.
     """
     home = Path.home()
+    registry_path = home / ".claude" / "plugins" / "installed_plugins.json"
+
+    def _verify_root(root: Path) -> Path | None:
+        """Return the directory that actually contains the upstream scripts/, or None."""
+        for candidate in (root / "plugins" / "seo-impact-plugin", root):
+            if (candidate / "scripts" / "impact_analyzer.py").is_file():
+                return candidate
+        return None
+
+    # --- Primary path: read installed_plugins.json ---
+    if registry_path.is_file():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            entries = (registry.get("plugins") or {})
+            # Match any marketplace — keyed `seo-impact-plugin@<marketplace>`. Project
+            # scope wins over user scope (the entry list is iterated in registry order
+            # and project-scoped installs are usually first; both work either way).
+            for key, install_list in entries.items():
+                if not key.startswith("seo-impact-plugin@"):
+                    continue
+                for entry in install_list or []:
+                    install_path = entry.get("installPath")
+                    if not install_path:
+                        continue
+                    verified = _verify_root(Path(install_path))
+                    if verified is not None:
+                        return verified
+        except (OSError, ValueError, KeyError):
+            pass  # fall through to glob fallback
+
+    # --- Fallback: glob the cache tree (retained for resilience) ---
     candidates = []
     for pattern in (
         "*/seo-impact-plugin/*/plugins/seo-impact-plugin/scripts/impact_analyzer.py",
         "*/seo-impact-plugin/*/scripts/impact_analyzer.py",
     ):
         for hit in (home / ".claude" / "plugins" / "cache").glob(pattern):
-            candidates.append(hit.parent.parent)  # plugin root = scripts/.parent
+            candidates.append(hit.parent.parent)
     if not candidates:
         raise RuntimeError(
-            "Could not find seo-impact-plugin in ~/.claude/plugins/cache/. "
-            "Install it via `/plugin marketplace update <marketplace>` first."
+            "Could not find seo-impact-plugin via installed_plugins.json or the "
+            "plugin cache. Install it via `/plugin marketplace add <marketplace>` + "
+            "`/plugin install seo-impact-plugin@<marketplace>` first."
         )
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0]

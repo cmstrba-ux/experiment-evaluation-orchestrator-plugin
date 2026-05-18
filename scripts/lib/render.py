@@ -440,11 +440,39 @@ def _backfill_remediated_srm(rv):
         return
     if isinstance(rv.get("srm"), dict) and rv["srm"].get("verdict"):
         return  # subagent already emitted it
-    variants = rv.get("variants") or {}
-    ctrl = variants.get("ctrl") or {}
-    treat = variants.get("treat") or {}
-    n_ctrl = ctrl.get("total_uv")
-    n_treat = treat.get("total_uv")
+    variants = rv.get("variants")
+    # Subagent contract per run-ab-evaluation/SKILL.md emits variants as a list of
+    # {name, role, uv, udv, m1, orders, bcookies} dicts. Older shapes used a dict
+    # {ctrl:{...}, treat:{...}} keyed by role. Normalize either shape into ctrl/treat
+    # arm dicts before reading the visitor count.
+    ctrl = treat = None
+    if isinstance(variants, dict):
+        ctrl = variants.get("ctrl") or {}
+        treat = variants.get("treat") or {}
+    elif isinstance(variants, list):
+        for v in variants:
+            if not isinstance(v, dict):
+                continue
+            role = str(v.get("role") or v.get("name") or "").lower()
+            if role in ("ctrl", "control"):
+                ctrl = v
+            elif role in ("treat", "treatment"):
+                treat = v
+        ctrl = ctrl or {}
+        treat = treat or {}
+    else:
+        return
+    # Accept the documented `total_uv` key first; fall back to the SKILL-schema list
+    # keys (`bcookies` is the canonical SRM denominator — distinct visitors per arm —
+    # and `uv` is the session-level count used by some legacy emitters).
+    def _arm_count(arm):
+        for key in ("total_uv", "bcookies", "uv", "n"):
+            val = arm.get(key)
+            if val is not None:
+                return val
+        return None
+    n_ctrl = _arm_count(ctrl)
+    n_treat = _arm_count(treat)
     if n_ctrl is None or n_treat is None:
         return
     try:
@@ -883,6 +911,37 @@ def load_run(run_dir: Path):
                 per_l2[l2] = per_l2.get(l2, 0) + 1
         experiments.setdefault(name, {})["n_deals"] = len(urls)
         experiments[name]["deals_per_l2"] = per_l2
+    # Merge queue metadata (evaluate_seo_since, is_in_flight, seo_eligible) from
+    # the orchestrator's queue.json so the renderer can compute the SEO TOO EARLY
+    # countdown ("X/14 days needed") and flag results as PRELIMINARY when the
+    # SEO release is still inside the 14-day pre-eligibility window. The queue
+    # field is the single source of truth; subagent JSONs don't carry it.
+    queue_path = run_dir / "queue.json"
+    if queue_path.is_file():
+        try:
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            queue = []
+        if isinstance(queue, list):
+            # Build a lookup keyed by both the safe-filename form and the raw
+            # alternate_name so we hit regardless of how the orchestrator slugged
+            # the file paths.
+            by_alt = {}
+            for q in queue:
+                if not isinstance(q, dict):
+                    continue
+                alt = q.get("alternate_name")
+                if alt:
+                    by_alt[alt] = q
+            for name, exp in experiments.items():
+                ab = exp.get("ab") or {}
+                alt = ab.get("alternate_name") or name
+                q = by_alt.get(alt)
+                if not q:
+                    continue
+                exp["evaluate_seo_since"] = q.get("evaluate_seo_since")
+                exp["is_in_flight"] = q.get("is_in_flight")
+                exp["seo_eligible"] = q.get("seo_eligible")
     return experiments
 
 
@@ -925,6 +984,247 @@ def _merge_categories(ab, seo):
             if suffix not in seo_cats:
                 seo_cats.append(suffix)
     return list(dict.fromkeys(ab_cats + seo_cats))
+
+
+# Defaults that shape the Final verdict. Tuned for Groupon-scale where:
+#  * 0.5% margin/visitor is the minimum effect we'd commit deploy/maintenance cost to
+#  * a 90% CI is the industry standard for product-decision CIs (vs 95% for academic
+#    significance) — Microsoft / Booking experimentation literature
+#  * SEO impressions at full signal is the leading indicator for long-term ranking
+#    risk; the -10% threshold matches the SearchPilot/Optibase kill-switch convention
+_DEFAULT_MWSE_PCT = 0.5
+_DEFAULT_CI_ALPHA = 0.10
+_GUARDRAIL_SEO_IMP_PCT_FULL_SIGNAL = -10.0
+_GUARDRAIL_CVR_NEG_PCT = -1.0
+_GUARDRAIL_CVR_P_THRESH = 0.05
+
+
+def _label_matrix_fallback(ab_verdict, seo_status, seo_verdict):
+    """Original 4×4 label matrix — used only when the composed funnel CI can't be
+    constructed (e.g. AB SE unrecoverable, SEO MISSING). Preserves prior behavior
+    so older runs and degenerate cases still produce a sensible verdict.
+    """
+    ab = (ab_verdict or "").upper()
+    if ab not in ("SHIP", "HOLD", "KILL"):
+        ab = "INCONCLUSIVE"
+    seo_v = (seo_verdict or "").upper()
+    if seo_status != "ok":
+        seo_cat = "MISSING"
+    elif seo_v in ("POSITIVE", "SHIP"):
+        seo_cat = "WIN"
+    elif seo_v in ("PAUSE", "NEGATIVE", "REDESIGN"):
+        seo_cat = "HARM"
+    else:
+        seo_cat = "UNCLEAR"
+    if ab == "KILL":
+        return "KILL"
+    if ab == "SHIP":
+        if seo_cat == "HARM":
+            return "KILL"
+        if seo_cat in ("WIN", "MISSING"):
+            return "DEPLOY"
+        return "HOLD"
+    return "KILL" if seo_cat == "HARM" else "HOLD"
+
+
+def _fmt_pct(v, sign=True):
+    if v is None:
+        return "n/a"
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return "n/a"
+    return f"{fv:+.2f}%" if sign else f"{fv:.2f}%"
+
+
+def _fmt_p(v):
+    if v is None:
+        return "n/a"
+    try:
+        fv = float(v)
+    except (TypeError, ValueError):
+        return "n/a"
+    return "<0.001" if fv < 0.001 else f"{fv:.3f}"
+
+
+def _compose_final_verdict(signals, mwse_pct=_DEFAULT_MWSE_PCT, ci_alpha=_DEFAULT_CI_ALPHA):
+    """Compose AB + SEO signals into a DEPLOY / HOLD / KILL verdict + rationale.
+
+    `signals` keys (all optional, None when missing):
+      ab_verdict          str — SHIP/HOLD/KILL/INCONCLUSIVE
+      m1uv_pct, m1uv_se, m1uv_p, m1uv_t, m1uv_n
+      cvr_pct,  cvr_se,  cvr_p,  cvr_t,  cvr_n
+      seo_status          'ok'/'no_urls'/'failed'/None
+      seo_verdict         upstream verdict label
+      seo_signal_strength 'full'/'partial'/None
+      did_imp_pct, did_clicks_pct, did_clicks_p
+      srm_verdict         'pass'/'fail' (post-remediation; persistent fail → no CI)
+      srm_promoted_from   'remediated' / None
+      ab_label            renderer-computed AB label (used to detect INCONCLUSIVE)
+
+    Decision order — strictly hierarchical:
+
+      1. Hard guardrails (KILL on trip, independent of composed CI):
+         a. AB CVR significantly negative (p<0.05 AND mean_delta_pct <= -1%)
+         b. Full-signal SEO impressions DiD <= -10%
+      2. Data-quality short-circuit:
+         a. SRM persistent fail (`srm_verdict == 'fail'` after promotion) → label-matrix
+      3. Composed funnel 90% CI rule (when both SEs available):
+         a. lower > +MWSE → DEPLOY
+         b. upper < -MWSE → KILL
+         c. otherwise → HOLD
+      4. Fallback to label matrix when CI can't be constructed.
+
+    Returns a dict with: verdict, rationale, cls, basis ('guardrail'/'ci'/'matrix'),
+    plus the composed CI fields so the renderer can show the [lower, upper] band.
+    """
+    from scripts.lib.stats import compose_funnel_ci, recover_se_from_p
+
+    # Extract signals (defensive defaults)
+    s = signals or {}
+    ab_verdict = s.get("ab_verdict")
+    m1uv_pct = s.get("m1uv_pct")
+    m1uv_p = s.get("m1uv_p")
+    m1uv_t = s.get("m1uv_t")
+    cvr_pct = s.get("cvr_pct")
+    cvr_p = s.get("cvr_p")
+    seo_status = s.get("seo_status")
+    seo_verdict = s.get("seo_verdict")
+    seo_signal = s.get("seo_signal_strength")
+    did_imp_pct = s.get("did_imp_pct")
+    did_clicks_pct = s.get("did_clicks_pct")
+    did_clicks_p = s.get("did_clicks_p")
+    srm_verdict = (s.get("srm_verdict") or "").lower()
+
+    # --- 1. Hard guardrails ----------------------------------------------------
+    guardrail_trip = None
+    if (cvr_pct is not None and cvr_p is not None
+            and cvr_pct <= _GUARDRAIL_CVR_NEG_PCT
+            and cvr_p < _GUARDRAIL_CVR_P_THRESH):
+        guardrail_trip = (
+            f"AB CVR significantly negative (CVR {_fmt_pct(cvr_pct)}, p={_fmt_p(cvr_p)}); "
+            f"floor is {_GUARDRAIL_CVR_NEG_PCT:.1f}% at p<{_GUARDRAIL_CVR_P_THRESH}."
+        )
+    if (guardrail_trip is None and seo_status == "ok"
+            and seo_signal == "full"
+            and did_imp_pct is not None
+            and did_imp_pct <= _GUARDRAIL_SEO_IMP_PCT_FULL_SIGNAL):
+        guardrail_trip = (
+            f"SEO impressions DiD {_fmt_pct(did_imp_pct)} at full signal trips the "
+            f"organic-ranking-risk floor of {_GUARDRAIL_SEO_IMP_PCT_FULL_SIGNAL:.0f}%."
+        )
+
+    # --- 2. Recover SEs --------------------------------------------------------
+    # AB M1+VFM/UV SE — prefer explicit se, then back out from t_stat, then from p.
+    m1uv_se = s.get("m1uv_se")
+    if m1uv_se is None and m1uv_t is not None and m1uv_pct is not None:
+        try:
+            t = float(m1uv_t)
+            if t != 0:
+                m1uv_se = abs(float(m1uv_pct)) / abs(t)
+        except (TypeError, ValueError):
+            m1uv_se = None
+    if m1uv_se is None:
+        m1uv_se = recover_se_from_p(m1uv_pct, m1uv_p)
+    # SEO clicks DiD SE — recover from upstream p-value (clamped) since the upstream
+    # plugin doesn't surface an explicit SE on did_clicks_pct.
+    clicks_se = s.get("clicks_se")
+    if clicks_se is None and seo_status == "ok":
+        clicks_se = recover_se_from_p(did_clicks_pct, did_clicks_p)
+
+    # --- 3. SRM persistent fail short-circuit ----------------------------------
+    srm_persistent_fail = (srm_verdict == "fail")
+
+    # --- 4. Build composed CI --------------------------------------------------
+    ci = compose_funnel_ci(
+        m1uv_pct=m1uv_pct,
+        m1uv_se_pct=m1uv_se,
+        clicks_pct=did_clicks_pct if seo_status == "ok" else None,
+        clicks_se_pct=clicks_se if seo_status == "ok" else None,
+        alpha=ci_alpha,
+    )
+
+    # --- 5. Resolve verdict ----------------------------------------------------
+    have_ci = bool(ci and ci.get("se") is not None and ci.get("lower") is not None)
+    basis = "matrix"
+    if guardrail_trip is not None:
+        final = "KILL"
+        basis = "guardrail"
+    elif srm_persistent_fail:
+        final = _label_matrix_fallback(ab_verdict, seo_status, seo_verdict)
+        basis = "matrix"
+    elif have_ci:
+        if ci["lower"] > mwse_pct:
+            final = "DEPLOY"
+        elif ci["upper"] < -mwse_pct:
+            final = "KILL"
+        else:
+            final = "HOLD"
+        basis = "ci"
+    else:
+        final = _label_matrix_fallback(ab_verdict, seo_status, seo_verdict)
+        basis = "matrix"
+
+    # --- 6. Build rationale ----------------------------------------------------
+    seo_v_str = (seo_verdict or "").upper() if seo_status == "ok" else None
+    sig_str = ""
+    if seo_signal == "full":
+        sig_str = "full signal"
+    elif seo_signal == "partial":
+        sig_str = "partial signal"
+
+    if basis == "ci":
+        ci_band = f"[{_fmt_pct(ci['lower'])} to {_fmt_pct(ci['upper'])}]"
+        ci_pct = int(round((1 - ci_alpha) * 100))
+        if final == "DEPLOY":
+            rationale = (
+                f"Composed net margin/visitor {_fmt_pct(ci['point'])} with {ci_pct}% CI {ci_band} — "
+                f"entirely above the +{mwse_pct:.1f}% minimum-worth-shipping threshold."
+            )
+        elif final == "KILL":
+            rationale = (
+                f"Composed net margin/visitor {_fmt_pct(ci['point'])} with {ci_pct}% CI {ci_band} — "
+                f"entirely below the -{mwse_pct:.1f}% threshold."
+            )
+        else:
+            rationale = (
+                f"Composed net margin/visitor {_fmt_pct(ci['point'])} with {ci_pct}% CI {ci_band} — "
+                f"straddles zero ±{mwse_pct:.1f}%, not enough evidence to decide."
+            )
+    elif basis == "guardrail":
+        rationale = f"Guardrail tripped: {guardrail_trip}"
+        if have_ci:
+            rationale += (
+                f" (Composed net margin/visitor would be {_fmt_pct(ci['point'])} — "
+                f"guardrails veto regardless.)"
+            )
+    else:
+        # Matrix fallback — preserve the old explanatory style so the user knows
+        # why we couldn't use the CI rule.
+        ab = (ab_verdict or "INCONCLUSIVE").upper()
+        ab_part = f"AB {ab} (M1+VFM/UV {_fmt_pct(m1uv_pct)}, p={_fmt_p(m1uv_p)})"
+        if seo_status == "ok":
+            seo_part = (f"SEO {seo_v_str} (impressions DiD {_fmt_pct(did_imp_pct)}"
+                        + (f", {sig_str}" if sig_str else "") + ")")
+        else:
+            seo_part = "SEO data unavailable"
+        reason = "SRM persistent fail — composed CI not trusted" if srm_persistent_fail \
+                 else "uncertainty bounds not recoverable from this run's data"
+        rationale = f"{ab_part}; {seo_part}. Verdict from rule-based matrix ({reason})."
+
+    cls = {"DEPLOY": "final-deploy", "HOLD": "final-hold", "KILL": "final-kill"}[final]
+    return {
+        "verdict": final,
+        "rationale": rationale,
+        "cls": cls,
+        "basis": basis,
+        "composed_point": ci["point"] if ci else None,
+        "composed_se": ci["se"] if ci else None,
+        "composed_lower": ci["lower"] if ci else None,
+        "composed_upper": ci["upper"] if ci else None,
+        "composed_alpha": ci["alpha"] if ci else ci_alpha,
+        "mwse_pct": mwse_pct,
+    }
 
 
 def build_payload(name, exp, run_id, data_through):
@@ -997,6 +1297,74 @@ def build_payload(name, exp, run_id, data_through):
         runway=runway_filtered,
         primary_p=f_stats.get("p_value") if isinstance(f_stats, dict) else None,
     )
+    # Composed AB+SEO Final verdict — surfaced at the top of each exec card and in
+    # summary.md. Built on the joint Net Margin/Visitor CI (delta-method composition
+    # of AB M1+VFM/UV %Δ and SEO clicks DiD %Δ) plus hard guardrails for ranking risk
+    # and CVR regressions. See _compose_final_verdict for the full decision hierarchy.
+    _seo_did = (seo or {}).get("did") or {}
+    _seo_overall = (seo or {}).get("overall") or {}
+    _seo_power = (seo or {}).get("power_analysis") or {}
+    # Source AB stats from the same view the exec card displays (population-wide
+    # unfiltered when available; falls back to filtered). Pulls t_stat + n directly
+    # so SE recovery is exact, not just approximated from p.
+    _ab_overall_stats = _flatten_stats((raw_ovr.get("stats") or {}))
+    _ab_filtered_stats = _flatten_stats((raw_filt.get("stats") or {}))
+    _ab_primary_stats = _ab_overall_stats if _ab_overall_stats else _ab_filtered_stats
+    _srm_overall = (ab.get("srm") or {}).get("overall") or {}
+    _signals = {
+        "ab_verdict": raw_filt.get("verdict") or raw_ovr.get("verdict"),
+        "ab_label": computed_label,
+        "m1uv_pct": (unfiltered_m1uv or {}).get("mean_delta_pct") if unfiltered_m1uv else None,
+        "m1uv_p":   (unfiltered_m1uv or {}).get("p_value") if unfiltered_m1uv else None,
+        "m1uv_t":   _ab_primary_stats.get("t_stat") if isinstance(_ab_primary_stats, dict) else None,
+        "m1uv_n":   _ab_primary_stats.get("n") if isinstance(_ab_primary_stats, dict) else None,
+        "m1uv_se":  _ab_primary_stats.get("se_pct") if isinstance(_ab_primary_stats, dict) else None,
+        "cvr_pct":  (unfiltered_cvr or {}).get("mean_delta_pct") if unfiltered_cvr else None,
+        "cvr_p":    (unfiltered_cvr or {}).get("p_value") if unfiltered_cvr else None,
+        "seo_status": (seo or {}).get("status"),
+        "seo_verdict": (seo or {}).get("verdict"),
+        "seo_signal_strength": _seo_overall.get("signal_strength"),
+        "did_imp_pct": _seo_did.get("did_impressions_pct"),
+        "did_clicks_pct": _seo_did.get("did_clicks_pct"),
+        "did_clicks_p":   _seo_power.get("p_value"),
+        "srm_verdict": (_srm_overall.get("verdict") or "").lower(),
+        "srm_promoted_from": _srm_overall.get("promoted_from"),
+    }
+    composed = _compose_final_verdict(_signals)
+
+    # SEO TOO EARLY computation. `evaluate_seo_since` is the SEO release date from
+    # test_definitions; the orchestrator only dispatches SEO when at least 14 days
+    # have elapsed since release. Before that, we show a "TOO EARLY — X/14 days"
+    # countdown in the exec card and mark the Final verdict as PRELIMINARY because
+    # the SEO component of the composed CI is unavailable. The 14-day threshold is
+    # the same one used in skills/list-experiments/SKILL.md (`seo_eligible`).
+    eval_seo_since = exp.get("evaluate_seo_since")
+    seo_status = (seo or {}).get("status")
+    seo_days_elapsed = None
+    seo_too_early = False
+    seo_days_needed_total = 14
+    if eval_seo_since and data_through:
+        try:
+            from datetime import date as _D
+            d_release = _D.fromisoformat(str(eval_seo_since))
+            d_through = _D.fromisoformat(str(data_through))
+            seo_days_elapsed = max(0, (d_through - d_release).days)
+            # Too early = SEO has not been dispatched AND the window hasn't matured.
+            # When seo_status is 'ok' we already have results; don't flag too-early.
+            if seo_status != "ok" and seo_days_elapsed < seo_days_needed_total:
+                seo_too_early = True
+        except (ValueError, TypeError):
+            pass
+
+    if seo_too_early:
+        # Overlay PRELIMINARY framing on the composed verdict — the verdict pill
+        # stays as-is (HOLD/KILL/DEPLOY from AB-only signal) but the rationale and
+        # label communicate that SEO is still pending.
+        composed["rationale"] = (
+            f"PRELIMINARY — awaiting SEO data ({seo_days_elapsed}/{seo_days_needed_total} days "
+            f"since release {eval_seo_since}). Current AB-only composition: {composed['rationale']}"
+        )
+
     return clean({
         "name": name,
         "run_id": run_id,
@@ -1005,10 +1373,31 @@ def build_payload(name, exp, run_id, data_through):
         "experiment_name": ab.get("experiment_name"),
         "start_date": start_date,
         "end_date": end_date,
+        "evaluate_seo_since": eval_seo_since,
+        "seo_too_early": seo_too_early,
+        "seo_days_elapsed": seo_days_elapsed,
+        "seo_days_needed_total": seo_days_needed_total,
         "n_deals": exp.get("n_deals"),  # from urls_<alt>.json (resolve-deal-urls output)
         "evaluation_narrative": ab.get("evaluation_narrative") or {},
         "deals_per_l2": exp.get("deals_per_l2") or {},  # {L2_name: count} for heatmap row labels
         "ab_label": computed_label,
+        # Composed AB+SEO final verdict (DEPLOY | HOLD | KILL) + one-sentence rationale +
+        # CSS class. JS reads `D.composed_verdict / composed_rationale / composed_cls`
+        # to render the Final row at the top of the exec card takeaway block.
+        "composed_verdict": composed["verdict"],
+        "composed_rationale": composed["rationale"],
+        "composed_cls": composed["cls"],
+        # CI-based composition fields. `composed_basis` distinguishes a verdict that
+        # came from the principled CI rule vs. the label-matrix fallback vs. a
+        # guardrail trip — visible in the exec card so the reader knows the level
+        # of statistical rigor behind the recommendation.
+        "composed_basis": composed["basis"],
+        "composed_net_pct": composed["composed_point"],
+        "composed_se_pct": composed["composed_se"],
+        "composed_lower_pct": composed["composed_lower"],
+        "composed_upper_pct": composed["composed_upper"],
+        "composed_alpha": composed["composed_alpha"],
+        "composed_mwse_pct": composed["mwse_pct"],
         "ab_label_subagent": ab.get("label"),  # subagent's original label, kept for traceability
         "srm_filtered": (ab.get("srm") or {}).get("filtered") or {},
         "srm_overall": (ab.get("srm") or {}).get("overall") or {},
@@ -1081,6 +1470,8 @@ body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg); color:
 header { background:linear-gradient(135deg,#1a365d 0%,#2b6cb0 100%); color:#fff; padding:32px 0 28px; }
 header .header-row { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; flex-wrap:wrap; }
 header h1 { font-size:1.9rem; font-weight:700; line-height:1.15; }
+header h1 .hdr-rerun-link { font-size:0.78rem; font-weight:600; padding:4px 10px; background:rgba(255,255,255,0.18); border:1px solid rgba(255,255,255,0.35); border-radius:14px; margin-left:14px; vertical-align:middle; color:#fff; text-decoration:none; letter-spacing:0.3px; white-space:nowrap; }
+header h1 .hdr-rerun-link:hover { background:rgba(255,255,255,0.28); border-color:rgba(255,255,255,0.6); }
 header .hdr-meta { opacity:0.88; font-size:0.9rem; text-align:right; line-height:1.4; }
 header .hdr-meta .stat { display:inline-block; padding:0 8px; border-left:1px solid rgba(255,255,255,0.35); }
 header .hdr-meta .stat:first-child { border-left:0; padding-left:0; }
@@ -1211,6 +1602,42 @@ td.label,th.label { text-align:left; }
 .exec-conf.exec-conf-mid .exec-tk-label { color:#744210; }
 .exec-conf.exec-conf-low { color:#742a2a; }
 .exec-conf.exec-conf-low .exec-tk-label { color:#742a2a; }
+/* Final composed AB+SEO verdict — first row of the takeaway block. Larger and bolder
+   than the Confidence/Why/Action rows since this is the bottom-line recommendation. */
+.exec-takeaway-row.exec-final { padding-bottom:6px; border-bottom:1px dashed var(--border); margin-bottom:2px; align-items:center; }
+.exec-takeaway-row.exec-final .exec-tk-label { font-size:0.74rem; font-weight:800; color:var(--text); }
+.exec-takeaway-row.exec-final .exec-final-pill { display:inline-block; font-weight:800; font-size:0.84rem; letter-spacing:0.5px; padding:3px 12px; border-radius:14px; margin-right:10px; vertical-align:middle; }
+.exec-takeaway-row.exec-final.final-deploy .exec-final-pill { background:#c6f6d5; color:#22543d; }
+.exec-takeaway-row.exec-final.final-hold   .exec-final-pill { background:#fefcbf; color:#744210; }
+.exec-takeaway-row.exec-final.final-kill   .exec-final-pill { background:#fed7d7; color:#742a2a; }
+.exec-takeaway-row.exec-final .exec-final-rationale { color:var(--text); font-size:0.94rem; }
+/* Final-row strip rendered ABOVE the tiles (moved out of the takeaway block so the
+   bottom-line recommendation is the first thing readers see after the experiment name).
+   Mirrors the takeaway Final-row look but stands as a standalone element. */
+.exec-final-strip { display:grid; grid-template-columns:90px 1fr; gap:10px; align-items:center; padding:10px 14px; border-radius:8px; background:#fafbfc; border:1px solid var(--border); border-left-width:4px; }
+.exec-final-strip .exec-tk-label { font-size:0.74rem; font-weight:800; color:var(--text); letter-spacing:0.6px; text-transform:uppercase; }
+.exec-final-strip .exec-final-pill { display:inline-block; font-weight:800; font-size:0.86rem; letter-spacing:0.5px; padding:4px 14px; border-radius:14px; margin-right:10px; vertical-align:middle; }
+.exec-final-strip.final-deploy { border-left-color:var(--green); background:#f0fff4; }
+.exec-final-strip.final-deploy .exec-final-pill { background:#c6f6d5; color:#22543d; }
+.exec-final-strip.final-hold { border-left-color:var(--yellow); background:#fffbeb; }
+.exec-final-strip.final-hold   .exec-final-pill { background:#fefcbf; color:#744210; }
+.exec-final-strip.final-kill { border-left-color:var(--red); background:#fff5f5; }
+.exec-final-strip.final-kill   .exec-final-pill { background:#fed7d7; color:#742a2a; }
+.exec-final-strip .exec-final-rationale { color:var(--text); font-size:0.95rem; line-height:1.45; }
+.exec-final-strip .exec-final-basis { display:inline-block; font-size:0.66rem; font-weight:700; letter-spacing:0.5px; text-transform:uppercase; padding:2px 8px; border-radius:10px; background:#edf2f7; color:#4a5568; margin-right:10px; vertical-align:middle; }
+/* Basis chip on the Final row — tells reader whether the verdict came from the
+   CI rule, a guardrail trip, or the label-matrix fallback. Same idea on the
+   Net-margin/visitor tile so the rigor level is visible in two places. */
+.exec-takeaway-row.exec-final .exec-final-basis {
+  display:inline-block; font-size:0.68rem; font-weight:700; letter-spacing:0.5px;
+  text-transform:uppercase; padding:2px 8px; border-radius:10px;
+  background:#edf2f7; color:#4a5568; margin-right:10px; vertical-align:middle;
+}
+.exec-tile .exec-tile-basis {
+  display:inline-block; font-size:0.6rem; font-weight:700; letter-spacing:0.4px;
+  text-transform:uppercase; padding:1px 6px; border-radius:8px;
+  background:#edf2f7; color:#4a5568; margin-left:6px; vertical-align:middle;
+}
 .exec-card-subtitle { font-size:0.8rem; color:var(--muted); font-weight:400; margin:-4px 0 2px; line-height:1.5; }
 .exec-card-subtitle.exec-card-subtitle-scale { font-size:0.76rem; color:#a0aec0; margin-top:0; }
 .exp-deals-scale { font-size:0.72rem; color:#a0aec0; margin-top:-2px; }
@@ -1225,7 +1652,7 @@ footer { background:#1a202c; color:#a0aec0; text-align:center; padding:20px; fon
 
 <header>
   <div class="container header-row">
-    <h1>Review Experiments evaluation</h1>
+    <h1>Review Experiments evaluation <a class="hdr-rerun-link" href="https://github.com/cmstrba-ux/experiment-evaluation-orchestrator-plugin" target="_blank" rel="noopener" title="Rerun this analysis locally — clone the plugin and run /evaluate-reviews-experiments">↻ Rerun</a></h1>
     <div id="hdr-meta" class="hdr-meta"></div>
   </div>
 </header>
@@ -1395,10 +1822,71 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
 
         n_deals = exp.get("n_deals")
         header_suffix = f" — {n_deals:,} deals" if isinstance(n_deals, int) and n_deals > 0 else ""
+        # Composed AB+SEO Final verdict (DEPLOY|HOLD|KILL). Recompute here using the
+        # same signals dict the exec card uses so summary.md and combined_report.html
+        # agree byte-for-byte.
+        seo_did = (seo or {}).get("did") or {}
+        seo_overall = (seo or {}).get("overall") or {}
+        seo_power = (seo or {}).get("power_analysis") or {}
+        ovr_stats = _flatten_stats((raw_ovr.get("stats") or {}))
+        filt_stats = _flatten_stats((raw_filt.get("stats") or {}))
+        primary_stats = ovr_stats if ovr_stats else filt_stats
+        srm_overall = (ab.get("srm") or {}).get("overall") or {}
+        # CVR signal for the guardrail check — derive from raw.overall.daily the
+        # same way the exec card does so the guardrail and the displayed tile share
+        # one source of truth.
+        ovr_cvr = stats_for_daily(ovr_daily, "cvr") if ovr_daily else None
+        composed = _compose_final_verdict({
+            "ab_verdict": ab_verdict,
+            "m1uv_pct": m_md,
+            "m1uv_p": m_p,
+            "m1uv_t": primary_stats.get("t_stat") if isinstance(primary_stats, dict) else None,
+            "m1uv_n": primary_stats.get("n") if isinstance(primary_stats, dict) else None,
+            "cvr_pct": (ovr_cvr or {}).get("mean_delta_pct") if ovr_cvr else None,
+            "cvr_p":   (ovr_cvr or {}).get("p_value")        if ovr_cvr else None,
+            "seo_status": (seo or {}).get("status"),
+            "seo_verdict": (seo or {}).get("verdict"),
+            "seo_signal_strength": seo_overall.get("signal_strength"),
+            "did_imp_pct": seo_did.get("did_impressions_pct"),
+            "did_clicks_pct": seo_did.get("did_clicks_pct"),
+            "did_clicks_p": seo_power.get("p_value"),
+            "srm_verdict": (srm_overall.get("verdict") or "").lower(),
+            "srm_promoted_from": srm_overall.get("promoted_from"),
+        })
+        # SEO TOO EARLY overlay — mirrors build_payload(). When evaluate_seo_since
+        # is set and < 14 days have elapsed, mark the Final as PRELIMINARY and
+        # surface the day-counter; SEO line shows "TOO EARLY — X/14 days needed".
+        eval_seo_since = exp.get("evaluate_seo_since")
+        seo_status_str = seo.get("status")
+        seo_days_elapsed = None
+        seo_too_early = False
+        if eval_seo_since and data_through and seo_status_str != "ok":
+            try:
+                from datetime import date as _D
+                d_release = _D.fromisoformat(str(eval_seo_since))
+                d_through = _D.fromisoformat(str(data_through))
+                seo_days_elapsed = max(0, (d_through - d_release).days)
+                if seo_days_elapsed < 14:
+                    seo_too_early = True
+            except (ValueError, TypeError):
+                pass
+        final_rationale_text = composed["rationale"]
+        if seo_too_early:
+            final_rationale_text = (
+                f"PRELIMINARY — awaiting SEO data ({seo_days_elapsed}/14 days since release "
+                f"{eval_seo_since}). Current AB-only composition: {composed['rationale']}"
+            )
+
         lines.append(f"- **{name}**{header_suffix}")
+        lines.append(f"  - Final: **{composed['verdict']}** — {final_rationale_text}")
         lines.append(f"  - AB: **{ab_verdict}** — {ab_summary}")
 
-        if seo.get("status") != "ok":
+        if seo_too_early:
+            lines.append(
+                f"  - SEO: **TOO EARLY** — {seo_days_elapsed}/14 days needed for preliminary "
+                f"results (release {eval_seo_since}; data through {data_through})"
+            )
+        elif seo.get("status") != "ok":
             seo_msg = seo.get("status") or "n/a"
             if seo.get("reason"):
                 seo_msg += f" ({seo['reason']})"
@@ -1423,6 +1911,7 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
     lines.extend([
         "",
         "## Methodology",
+        "- **Final** verdict (DEPLOY|HOLD|KILL) is built from a joint Net Margin/Visitor CI (delta-method composition of AB M1+VFM/UV %Δ and SEO clicks DiD %Δ, 90% CI) plus hard guardrails: SEO impressions DiD ≤ −10% at full signal → KILL; AB CVR ≤ −1% at p<0.05 → KILL. CI rule: lower > +0.5% → DEPLOY; upper < −0.5% → KILL; straddling → HOLD. The `basis` chip on each card shows whether the verdict came from the CI rule, a guardrail trip, or the label-matrix fallback. Full rule in `skills/render-combined-report/SKILL.md`.",
         "- AB %Δ: aggregate ratio SUM(num)/SUM(den) (ab-experiments canon, matches Groupon dashboards). Daily means are not used.",
         "- AB significance: paired t-test on daily M1+VFM/UV, α=0.05.",
         "- SRM check: chi-square, α=0.001. Active-visitor remediation surfaces when raw fails AND AV passes.",
