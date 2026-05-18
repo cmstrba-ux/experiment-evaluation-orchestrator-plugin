@@ -1,3 +1,28 @@
+0.8.0 — GitHub Actions deployment + curl-only IQ publish (CI-friendly):
+  - .github/workflows/evaluate.yml — Mon/Wed/Fri 11:00 UTC cron + manual trigger.
+    Authenticates to GCP via Workload Identity Federation (no static SA keys),
+    installs gcloud + `bq` CLI, npm-installs Claude Code, clones the two
+    dependent plugins (ab-experiments from GHE, seo-impact-plugin from gh.com),
+    runs `claude --print "/evaluate-reviews-experiments"` headless, then
+    pure-curl publishes to Groupon IQ.
+  - .github/scripts/setup-plugins.sh — assembles a temporary `ci-marketplace`
+    directory with all three plugins cloned at HEAD, writes the matching
+    `installed_plugins.json` registry so headless Claude Code can resolve them.
+    Pattern intentionally mirrors what local `/plugin install` produces.
+  - .github/scripts/publish-to-iq.sh — pure-curl IQ publish using endpoints
+    discovered via REST probing (no IQ MCP needed):
+      * POST /reports/list  {search} → find existing report by title
+      * POST /reports/reports  {title,visibility,folderId,description} → create
+      * POST /reports/reports/<id>/versions  multipart file → upload
+    Title: `Experiment Evaluation Combined Report — YYYY-MM-DD` from run_id.
+    Same-day reruns version the existing report (idempotent).
+  - .github/WORKFLOW_SETUP.md — one-time setup guide: WIF pool creation,
+    service account permissions, GitHub secrets list, cost expectations
+    (~$15-30/run × 12 runs/month at current Opus pricing).
+  - Workflow runs Claude with IQ_API_KEY *intentionally unset* so the skill's
+    Step 11 is skipped — the curl publish step downstream handles it. The
+    skill still uses MCP for local runs; CI bypasses both paths.
+
 0.7.5 — Directional KILL guardrail + PRELIMINARY day countdown:
   - render.py:_compose_final_verdict — third hard guardrail added:
     `Directional KILL` when M1+VFM/UV ≤ -1% AND CVR ≤ -2% **regardless of

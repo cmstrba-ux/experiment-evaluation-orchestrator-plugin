@@ -1,0 +1,151 @@
+name: Evaluate Review Experiments
+
+# Runs the experiment-evaluation orchestrator on a schedule and publishes the
+# resulting combined_report.html to Groupon IQ. Local-only flow in this repo
+# uses Claude Code interactively with full MCPs; this CI flow runs headless and
+# publishes via the IQ REST API (pure curl) so no IQ MCP install is needed.
+#
+# Required GitHub repo secrets (Settings → Secrets and variables → Actions):
+#   ANTHROPIC_API_KEY           — Claude API key. https://console.anthropic.com/
+#   IQ_API_KEY                  — Groupon IQ personal token. https://iq.groupon.com/api-tokens
+#   GCP_WORKLOAD_IDENTITY_PROVIDER — projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+#   GCP_SERVICE_ACCOUNT         — <name>@<project>.iam.gserviceaccount.com (impersonated via WIF)
+#   GHE_TOKEN                   — github.groupondev.com PAT with `repo` scope on pcernik/claude-skills
+#                                 (used to clone ab-experiments plugin from GHE)
+#   GH_TOKEN                    — github.com PAT with `repo` scope if seo-impact-plugin is private
+#                                 (the auto-provided GITHUB_TOKEN won't work cross-repo)
+#
+# WIF setup outside this repo (one-time, done in GCP console):
+#   1. Create a Workload Identity Pool + GitHub OIDC provider in your GCP project.
+#   2. Pick or create a service account with BigQuery Job User (workspace project)
+#      + BigQuery Data Viewer on the source datasets:
+#        - kbc-grpn-40-0cd2 (L3 Product Analytics — orchestrator queue, AB tables)
+#        - kbc-grpn-35 (L2 UE)         — if needed for upstream tables
+#        - prj-grp-dataview-prod-1ff9  (SEO datamart + GSC)
+#   3. Grant the GitHub OIDC principal `roles/iam.workloadIdentityUser` on the SA.
+#   4. Set GCP_WORKLOAD_IDENTITY_PROVIDER + GCP_SERVICE_ACCOUNT secrets above.
+
+on:
+  schedule:
+    # Mon, Wed, Fri at 11:00 UTC (= 12:00 Bratislava winter / 13:00 summer).
+    # Cron times are in UTC; adjust to taste.
+    - cron: '0 11 * * 1,3,5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Orchestrator mode (auto | explicit <name> | since YYYY-MM-DD)'
+        required: false
+        default: 'auto'
+
+# Workload Identity Federation needs id-token: write. contents: read is enough
+# for the actions/checkout step.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # Only one run at a time on `main` — sequential runs prevent IQ publish races.
+  group: evaluate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # AB + SEO subagents on Opus, ~30-60 min total in our local runs
+
+    steps:
+      - name: Checkout orchestrator plugin
+        uses: actions/checkout@v4
+        with:
+          path: experiment-evaluation-orchestrator-plugin
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud + bq CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: bq
+
+      - name: Verify bq is authenticated
+        run: |
+          set -euo pipefail
+          bq query --use_legacy_sql=false --format=prettyjson --max_rows=1 \
+            'SELECT CURRENT_TIMESTAMP() AS now' > /tmp/bq_test.json
+          echo "bq test query:"
+          cat /tmp/bq_test.json
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code CLI (headless)
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Set up Python (for render.py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps (python-docx for c3 passthrough .docx parsing)
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-docx pyarrow db-dtypes google-cloud-bigquery pandas numpy scipy
+
+      - name: Install dependent plugins (ab-experiments from GHE, seo-impact-plugin from gh.com)
+        env:
+          GHE_TOKEN: ${{ secrets.GHE_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash experiment-evaluation-orchestrator-plugin/.github/scripts/setup-plugins.sh
+
+      - name: Run orchestrator (headless Claude Code)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Intentionally do NOT set IQ_API_KEY here. The skill's Step 11 detects
+          # this and skips MCP-based publish; the next workflow step does pure-curl
+          # publish using the IQ REST API instead.
+          MODE: ${{ inputs.mode || 'auto' }}
+        run: |
+          set -euo pipefail
+          mkdir -p temp/experiment-evaluation
+          # Use --print (-p) for non-interactive mode. The slash command triggers
+          # the orchestrator skill via its plugin command file. The orchestrator
+          # writes outputs under temp/experiment-evaluation/<run_id>/.
+          claude --print "/evaluate-reviews-experiments ${MODE}"
+
+      - name: Locate run_dir
+        id: run_dir
+        run: |
+          set -euo pipefail
+          RUN_DIR=$(find temp/experiment-evaluation -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          if [[ -z "$RUN_DIR" || ! -f "$RUN_DIR/combined_report.html" ]]; then
+            echo "::error::No combined_report.html found under temp/experiment-evaluation"
+            ls -la temp/experiment-evaluation/ || true
+            exit 1
+          fi
+          echo "run_dir=$RUN_DIR" >> "$GITHUB_OUTPUT"
+          echo "Located: $RUN_DIR"
+          ls -la "$RUN_DIR"
+
+      - name: Publish to Groupon IQ (pure curl, no MCP)
+        env:
+          IQ_API_KEY: ${{ secrets.IQ_API_KEY }}
+          RUN_DIR: ${{ steps.run_dir.outputs.run_dir }}
+        run: bash experiment-evaluation-orchestrator-plugin/.github/scripts/publish-to-iq.sh
+
+      - name: Upload combined report + summary as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-report-${{ github.run_id }}
+          path: |
+            temp/experiment-evaluation/*/combined_report.html
+            temp/experiment-evaluation/*/summary.md
+            temp/experiment-evaluation/*/passthrough/*.docx
+          retention-days: 30
