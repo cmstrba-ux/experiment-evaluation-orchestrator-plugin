@@ -1,113 +1,105 @@
 #!/usr/bin/env bash
-# Install dependent plugins (ab-experiments vendored in this repo, seo-impact-plugin
-# from gh.com) and wire them into Claude Code's plugin registry so the headless
-# `claude` CLI can find them.
+# Install dependent plugins into the local Claude Code config so headless
+# `claude --print` can resolve slash commands like /evaluate-reviews-experiments.
+#
+# Strategy: place source code at ~/.claude/plugins/local-marketplaces/ci-marketplace/
+# (matches the directory pattern that Claude Code auto-discovers), then use
+# `claude --print "/plugin marketplace add ..."` and `/plugin install ...` to
+# do the canonical registration — the same operations the interactive UI runs.
+# This is more reliable than hand-writing installed_plugins.json because the
+# install command also handles per-version cache materialization, enabling,
+# and any internal registry side effects we don't know about.
 #
 # Required env (set by the workflow):
-#   GH_TOKEN  — github.com PAT (only needed if seo-impact-plugin is private)
-#
-# Plugin registry layout (mirrors what `/plugin install` produces locally):
-#   ~/.claude/plugins/installed_plugins.json     — registry, points to installPath per plugin
-#   ~/.claude/plugins/ci-marketplace/plugins/<name>/   — plugin sources
-#
-# ab-experiments is vendored under vendor/ab-experiments/ in this repo (synced manually
-# from pcernik/claude-skills on Groupon GHE — see VENDOR_AB_EXPERIMENTS.md for the
-# refresh procedure). Vendoring avoids any need for GHE access from CI runners, since
-# the Groupon GHE instance is VPN-only and GitHub Actions cloud runners can't reach it.
+#   ANTHROPIC_API_KEY — Claude API key (needed because /plugin install boots a Claude session)
+#   GH_TOKEN          — github.com PAT (only if seo-impact-plugin is private)
 set -euo pipefail
 
 PLUGINS_ROOT="$HOME/.claude/plugins"
-CI_MP="$PLUGINS_ROOT/ci-marketplace"
-mkdir -p "$CI_MP/plugins" "$CI_MP/.claude-plugin"
+LMP_NAME="ci-marketplace"
+LMP="$PLUGINS_ROOT/local-marketplaces/$LMP_NAME"
+WS="$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin"
 
-# 1) ab-experiments — vendored copy in vendor/ab-experiments/ of this repo.
-echo "==> Linking vendored ab-experiments from $GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin/vendor/ab-experiments"
-VENDORED_AB="$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin/vendor/ab-experiments"
-if [[ ! -d "$VENDORED_AB" ]]; then
-  echo "::error::Vendored ab-experiments not found at $VENDORED_AB"
-  exit 1
-fi
-cp -r "$VENDORED_AB" "$CI_MP/plugins/ab-experiments"
-# Use the orchestrator repo's HEAD SHA as the version proxy for ab-experiments
-# (since the vendored copy doesn't carry its own git history). Good-enough
-# audit signal — "vendor was current as of orchestrator commit X".
-AB_SHA=$(cd "$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin" && git rev-parse HEAD)
+mkdir -p "$LMP/plugins" "$LMP/.claude-plugin"
 
-# 2) seo-impact-plugin — github.com/c-pacharya-groupon/seo-impact-plugin
-echo "==> Cloning c-pacharya-groupon/seo-impact-plugin"
+# ---------- Step 1: stage plugin source code under local-marketplaces ----------
+
+# 1a) ab-experiments — copy from vendored snapshot (no GHE access needed in CI).
+echo "==> Staging vendored ab-experiments"
+cp -r "$WS/vendor/ab-experiments" "$LMP/plugins/ab-experiments"
+
+# 1b) seo-impact-plugin — clone from github.com.
+echo "==> Cloning seo-impact-plugin from github.com"
 SEO_URL="https://github.com/c-pacharya-groupon/seo-impact-plugin.git"
 if [[ -n "${GH_TOKEN:-}" ]]; then
   SEO_URL="https://x-access-token:${GH_TOKEN}@github.com/c-pacharya-groupon/seo-impact-plugin.git"
 fi
-git clone --depth 1 "$SEO_URL" "$CI_MP/plugins/seo-impact-plugin"
-SEO_SHA=$(cd "$CI_MP/plugins/seo-impact-plugin" && git rev-parse HEAD)
+git clone --depth 1 "$SEO_URL" "$LMP/plugins/seo-impact-plugin"
 
-# 3) experiment-evaluation-orchestrator — this repo, already checked out in GITHUB_WORKSPACE
-echo "==> Linking experiment-evaluation-orchestrator from $GITHUB_WORKSPACE"
-ln -sfn "$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin" \
-  "$CI_MP/plugins/experiment-evaluation-orchestrator"
-ORCH_VERSION=$(cat "$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin/.claude-plugin/plugin.json" \
-  | python -c "import json,sys; print(json.load(sys.stdin)['version'])")
-ORCH_SHA=$(cd "$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin" && git rev-parse HEAD)
+# 1c) experiment-evaluation-orchestrator — copy this repo (NOT symlink; symlinks
+# are unreliable across Claude Code's plugin scan on some Linux setups).
+echo "==> Staging experiment-evaluation-orchestrator from $WS"
+cp -r "$WS" "$LMP/plugins/experiment-evaluation-orchestrator"
+# Drop .git so the staged copy doesn't carry the orchestrator repo's history.
+rm -rf "$LMP/plugins/experiment-evaluation-orchestrator/.git"
 
-# 4) Write ci-marketplace's marketplace.json so Claude Code understands the trio as a marketplace.
-cat > "$CI_MP/.claude-plugin/marketplace.json" <<JSON
+# Step 2: write the marketplace manifest so Claude Code's marketplace discovery
+# finds the trio when it scans ~/.claude/plugins/local-marketplaces/*/.
+cat > "$LMP/.claude-plugin/marketplace.json" <<JSON
 {
   "\$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "ci-marketplace",
+  "name": "$LMP_NAME",
   "description": "Ephemeral marketplace assembled by GitHub Actions for headless orchestrator runs",
   "owner": { "name": "ci", "email": "ci@noreply" },
   "plugins": [
-    { "name": "ab-experiments", "source": "./plugins/ab-experiments" },
-    { "name": "seo-impact-plugin", "source": "./plugins/seo-impact-plugin" },
-    { "name": "experiment-evaluation-orchestrator", "source": "./plugins/experiment-evaluation-orchestrator" }
+    { "name": "ab-experiments",                       "source": "./plugins/ab-experiments" },
+    { "name": "seo-impact-plugin",                    "source": "./plugins/seo-impact-plugin" },
+    { "name": "experiment-evaluation-orchestrator",   "source": "./plugins/experiment-evaluation-orchestrator" }
   ]
 }
 JSON
 
-# 5) Write installed_plugins.json registry. Claude Code reads this to find each
-#    plugin's installPath at runtime. Format matches what /plugin install writes locally.
-cat > "$PLUGINS_ROOT/installed_plugins.json" <<JSON
-{
-  "version": 2,
-  "plugins": {
-    "ab-experiments@ci-marketplace": [
-      {
-        "scope": "user",
-        "installPath": "$CI_MP/plugins/ab-experiments",
-        "version": "$AB_SHA",
-        "installedAt": "$(date -Iseconds)",
-        "lastUpdated": "$(date -Iseconds)",
-        "gitCommitSha": "$AB_SHA"
-      }
-    ],
-    "seo-impact-plugin@ci-marketplace": [
-      {
-        "scope": "user",
-        "installPath": "$CI_MP/plugins/seo-impact-plugin",
-        "version": "$SEO_SHA",
-        "installedAt": "$(date -Iseconds)",
-        "lastUpdated": "$(date -Iseconds)",
-        "gitCommitSha": "$SEO_SHA"
-      }
-    ],
-    "experiment-evaluation-orchestrator@ci-marketplace": [
-      {
-        "scope": "user",
-        "installPath": "$CI_MP/plugins/experiment-evaluation-orchestrator",
-        "version": "$ORCH_VERSION",
-        "installedAt": "$(date -Iseconds)",
-        "lastUpdated": "$(date -Iseconds)",
-        "gitCommitSha": "$ORCH_SHA"
-      }
-    ]
-  }
-}
-JSON
+echo "==> Marketplace staged at $LMP"
+ls -la "$LMP/plugins/"
+echo ""
+echo "==> marketplace.json:"
+cat "$LMP/.claude-plugin/marketplace.json"
+
+# ---------- Step 3: use `claude` to register marketplace + install plugins ----
+
+# These calls hit the Claude API briefly (each spawns a small session). Cost
+# per call is tiny (~$0.005 each), but adds up across 4 calls — keep them at
+# the end so we fail fast on staging errors before burning tokens.
+#
+# `--print` mode: claude runs the prompt non-interactively, prints output,
+# exits. Slash commands are recognized; /plugin install writes to
+# ~/.claude/plugins/installed_plugins.json which persists for the next
+# claude invocation (i.e., the orchestrator run step below).
 
 echo ""
-echo "==> Plugins installed:"
-ls -la "$CI_MP/plugins/"
+echo "==> claude --version"
+claude --version
+
 echo ""
-echo "==> Registry:"
+echo "==> Registering ci-marketplace"
+claude --print "/plugin marketplace add $LMP"
+
+echo ""
+echo "==> Installing ab-experiments@$LMP_NAME"
+claude --print "/plugin install ab-experiments@$LMP_NAME"
+
+echo ""
+echo "==> Installing seo-impact-plugin@$LMP_NAME"
+claude --print "/plugin install seo-impact-plugin@$LMP_NAME"
+
+echo ""
+echo "==> Installing experiment-evaluation-orchestrator@$LMP_NAME"
+claude --print "/plugin install experiment-evaluation-orchestrator@$LMP_NAME"
+
+echo ""
+echo "==> Verifying — /plugin list (should show all 3)"
+claude --print "/plugin list"
+
+echo ""
+echo "==> Verifying — installed_plugins.json contents:"
 cat "$PLUGINS_ROOT/installed_plugins.json"

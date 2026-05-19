@@ -193,10 +193,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p temp/experiment-evaluation
-          # Use --print (-p) for non-interactive mode. The slash command triggers
-          # the orchestrator skill via its plugin command file. The orchestrator
-          # writes outputs under temp/experiment-evaluation/<run_id>/.
-          claude --print "/evaluate-reviews-experiments ${MODE}"
+          # Use --print (-p) for non-interactive mode. The NAMESPACED slash command
+          # form `<plugin>:<command>` is required when the bare form collides with
+          # other plugin commands or is otherwise unresolved (memory note
+          # feedback_claude_code_slash_commands.md: "bare names collide via prefix-
+          # matching across plugins"). The first CI attempt failed with
+          # "Unknown command: /evaluate-reviews-experiments" — using the namespaced
+          # form bypasses that ambiguity. The orchestrator writes outputs under
+          # temp/experiment-evaluation/<run_id>/.
+          claude --print "/experiment-evaluation-orchestrator:evaluate-reviews-experiments ${MODE}"
 
       - name: Locate run_dir
         id: run_dir
