@@ -1,3 +1,22 @@
+0.8.2 — Vendor ab-experiments (GHE-only repo) into this repo for CI:
+  - vendor/ab-experiments/ — snapshot of pcernik/claude-skills plugin from
+    Groupon GHE (which GitHub Actions cloud runners can't reach because
+    github.groupondev.com is VPN-only). Vendoring removes the runtime
+    dependency on GHE so CI can install the plugin from a local path.
+  - vendor/ab-experiments/REFRESH.md — refresh procedure (PowerShell snippet)
+    to re-vendor from the local cache when upstream changes. Manual refresh
+    is acceptable since ab-experiments rarely changes (~few times a year).
+  - vendor/ab-experiments/UPSTREAM_VERSION.txt — pins the upstream cache
+    folder name (e.g., 07fc9cf0b29f-b24d237c) for audit traceability.
+  - .github/scripts/setup-plugins.sh — replaced the GHE git-clone step with
+    a `cp` from the vendored path. AB_SHA now derives from the orchestrator
+    repo's HEAD SHA (good-enough audit signal — "vendor was current as of
+    orchestrator commit X").
+  - .github/workflows/evaluate.yml + WORKFLOW_SETUP.md — dropped the
+    GHE_TOKEN secret requirement. Now only 4 secrets needed:
+    ANTHROPIC_API_KEY, IQ_API_KEY, GCP_ADC_JSON, and optionally GH_TOKEN
+    (only if seo-impact-plugin is private).
+
 0.8.1 — bq shim so ADC user OAuth credentials work in headless CI:
   - The gcloud SDK's `bq` CLI refuses to use ADC user OAuth credentials with
     "no active account selected" — it requires either `gcloud auth login`

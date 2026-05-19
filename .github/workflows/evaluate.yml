@@ -15,10 +15,11 @@ name: Evaluate Review Experiments
 #                        Refresh tokens last months unless revoked via
 #                        `gcloud auth application-default revoke` or org session policy.
 #                        Rotate when needed: revoke, re-login, re-paste the secret.
-#   GHE_TOKEN          — github.groupondev.com PAT with `repo` scope on pcernik/claude-skills
-#                        (used to clone ab-experiments plugin from GHE)
 #   GH_TOKEN           — github.com PAT with `repo` scope if seo-impact-plugin is private
 #                        (the auto-provided GITHUB_TOKEN won't work cross-repo)
+#
+# ab-experiments is vendored in vendor/ab-experiments/ (synced from
+# pcernik/claude-skills on Groupon GHE). No GHE access needed in CI.
 #
 # Auth approach: this workflow uses your gcloud user OAuth credentials instead of
 # Workload Identity Federation. Reason: WIF requires creating a workload identity
@@ -177,9 +178,8 @@ jobs:
           # Verify the shim is first on PATH (after $GITHUB_PATH propagates to the next step).
           ls -la /opt/bq-shim/
 
-      - name: Install dependent plugins (ab-experiments from GHE, seo-impact-plugin from gh.com)
+      - name: Install dependent plugins (ab-experiments vendored, seo-impact-plugin from gh.com)
         env:
-          GHE_TOKEN: ${{ secrets.GHE_TOKEN }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: bash experiment-evaluation-orchestrator-plugin/.github/scripts/setup-plugins.sh
 

@@ -1,34 +1,37 @@
 #!/usr/bin/env bash
-# Clone dependent plugins (ab-experiments from GHE, seo-impact-plugin from gh.com)
-# and wire them into Claude Code's plugin registry so the headless `claude` CLI
-# can find them.
+# Install dependent plugins (ab-experiments vendored in this repo, seo-impact-plugin
+# from gh.com) and wire them into Claude Code's plugin registry so the headless
+# `claude` CLI can find them.
 #
 # Required env (set by the workflow):
-#   GHE_TOKEN — github.groupondev.com PAT with read on pcernik/claude-skills
 #   GH_TOKEN  — github.com PAT (only needed if seo-impact-plugin is private)
 #
 # Plugin registry layout (mirrors what `/plugin install` produces locally):
 #   ~/.claude/plugins/installed_plugins.json     — registry, points to installPath per plugin
-#   ~/.claude/plugins/ci-marketplace/plugins/<name>/   — cloned plugin sources
+#   ~/.claude/plugins/ci-marketplace/plugins/<name>/   — plugin sources
+#
+# ab-experiments is vendored under vendor/ab-experiments/ in this repo (synced manually
+# from pcernik/claude-skills on Groupon GHE — see VENDOR_AB_EXPERIMENTS.md for the
+# refresh procedure). Vendoring avoids any need for GHE access from CI runners, since
+# the Groupon GHE instance is VPN-only and GitHub Actions cloud runners can't reach it.
 set -euo pipefail
 
 PLUGINS_ROOT="$HOME/.claude/plugins"
 CI_MP="$PLUGINS_ROOT/ci-marketplace"
 mkdir -p "$CI_MP/plugins" "$CI_MP/.claude-plugin"
 
-# 1) ab-experiments — git subdir of pcernik/claude-skills (Groupon GHE)
-echo "==> Cloning pcernik/claude-skills from GHE (subdir: plugins/pcernik/ab-experiments)"
-if [[ -z "${GHE_TOKEN:-}" ]]; then
-  echo "::error::GHE_TOKEN is not set; cannot clone github.groupondev.com/pcernik/claude-skills"
+# 1) ab-experiments — vendored copy in vendor/ab-experiments/ of this repo.
+echo "==> Linking vendored ab-experiments from $GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin/vendor/ab-experiments"
+VENDORED_AB="$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin/vendor/ab-experiments"
+if [[ ! -d "$VENDORED_AB" ]]; then
+  echo "::error::Vendored ab-experiments not found at $VENDORED_AB"
   exit 1
 fi
-TMP_SKILLS=$(mktemp -d)
-git clone --depth 1 \
-  "https://x-access-token:${GHE_TOKEN}@github.groupondev.com/pcernik/claude-skills.git" \
-  "$TMP_SKILLS"
-cp -r "$TMP_SKILLS/plugins/pcernik/ab-experiments" "$CI_MP/plugins/ab-experiments"
-AB_SHA=$(cd "$TMP_SKILLS" && git rev-parse HEAD)
-rm -rf "$TMP_SKILLS"
+cp -r "$VENDORED_AB" "$CI_MP/plugins/ab-experiments"
+# Use the orchestrator repo's HEAD SHA as the version proxy for ab-experiments
+# (since the vendored copy doesn't carry its own git history). Good-enough
+# audit signal — "vendor was current as of orchestrator commit X".
+AB_SHA=$(cd "$GITHUB_WORKSPACE/experiment-evaluation-orchestrator-plugin" && git rev-parse HEAD)
 
 # 2) seo-impact-plugin — github.com/c-pacharya-groupon/seo-impact-plugin
 echo "==> Cloning c-pacharya-groupon/seo-impact-plugin"

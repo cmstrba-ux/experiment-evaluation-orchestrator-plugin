@@ -41,10 +41,11 @@ Settings → Secrets and variables → Actions → **New repository secret**. Ad
 | `ANTHROPIC_API_KEY` | `sk-ant-…` | https://console.anthropic.com/settings/keys |
 | `IQ_API_KEY` | Groupon IQ personal token | Copy from your local `~/.claude/settings.json` `env.IQ_API_KEY`, or mint a new one at https://iq.groupon.com/api-tokens |
 | `GCP_ADC_JSON` | Contents of the JSON file from step 1 | Paste the whole file content (including `{` and `}`) |
-| `GHE_TOKEN` | github.groupondev.com PAT with `repo` scope on `pcernik/claude-skills` | https://github.groupondev.com/settings/tokens — pick `repo` scope, set expiration to your comfort level |
 | `GH_TOKEN` *(optional)* | github.com PAT with `repo` scope, only if `c-pacharya-groupon/seo-impact-plugin` is private | https://github.com/settings/tokens |
 
 > The auto-provided `GITHUB_TOKEN` only has access to *this* repo — for cloning other public/private repos you must use a separate PAT. If `seo-impact-plugin` is fully public, you can omit `GH_TOKEN`.
+
+> The `ab-experiments` plugin is **vendored** in `vendor/ab-experiments/` of this repo (it lives on Groupon's GHE which is VPN-only, unreachable from GitHub Actions cloud runners). To refresh the vendored copy when upstream changes, see `vendor/ab-experiments/REFRESH.md`.
 
 ---
 
