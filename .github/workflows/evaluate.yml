@@ -66,7 +66,19 @@ jobs:
       - name: Authenticate to Google Cloud (user OAuth via ADC)
         env:
           GCP_ADC_JSON: ${{ secrets.GCP_ADC_JSON }}
-          GCP_BILLING_PROJECT: prj-grp-foundryai-dev-7c37  # where BQ jobs bill to
+          # Two distinct projects:
+          #   GCP_BILLING_PROJECT — where the BQ job RUNS (billed for slot-time /
+          #                        on-demand bytes). Matches the user's local
+          #                        `gcloud config list project` so CI behavior
+          #                        mirrors interactive use.
+          #   GCP_QUOTA_PROJECT  — quota attribution for API calls (Google client
+          #                        libs send this as the "user project" header).
+          #                        Comes from the ADC JSON's `quota_project_id`
+          #                        field by default; we override here so a future
+          #                        re-export of the ADC file can't silently
+          #                        shift CI's quota attribution.
+          GCP_BILLING_PROJECT: prj-grp-foundryai-dev-7c37
+          GCP_QUOTA_PROJECT: prj-grp-dataview-prod-1ff9
         run: |
           set -euo pipefail
           if [[ -z "${GCP_ADC_JSON:-}" ]]; then
@@ -97,10 +109,14 @@ jobs:
           #   CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE       — gcloud SDK + `bq` auth override
           echo "GOOGLE_APPLICATION_CREDENTIALS=$ADC_PATH" >> "$GITHUB_ENV"
           echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$ADC_PATH" >> "$GITHUB_ENV"
-          # Set the billing project so `bq` knows where to run jobs from (data lives
-          # cross-project in kbc-grpn-40-0cd2 + prj-grp-dataview-prod-1ff9; jobs bill
-          # to this project).
+          # Set the billing project so `bq` (and the shim) knows where to run jobs.
+          # Data lives cross-project in kbc-grpn-40-0cd2 + prj-grp-dataview-prod-1ff9;
+          # jobs bill to GCP_BILLING_PROJECT (slot-time / on-demand).
           gcloud config set project "$GCP_BILLING_PROJECT"
+          # GOOGLE_CLOUD_QUOTA_PROJECT — Python google-cloud-* libs read this for the
+          # "user project" header in API calls. Overrides quota_project_id from the
+          # ADC JSON if present.
+          echo "GOOGLE_CLOUD_QUOTA_PROJECT=$GCP_QUOTA_PROJECT" >> "$GITHUB_ENV"
           gcloud config list
 
       - name: Verify bq shim is on PATH and ADC works
