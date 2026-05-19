@@ -1,3 +1,27 @@
+0.8.3 — Switch active workflow to self-hosted runner (uses Max OAuth, $0 tokens):
+  - Cloud-runner + ANTHROPIC_API_KEY path moved to .github/disabled/ for
+    rollback. The active workflow now targets [self-hosted, windows] and
+    uses the user's existing OAuth Claude Code login + local bq + local
+    plugins. No pay-per-token billing.
+  - .github/workflows/evaluate.yml — rewritten for self-hosted: sanity-check
+    tooling on PATH, git pull plugin (skip if uncommitted local changes),
+    claude --print "/experiment-evaluation-orchestrator:evaluate-reviews-experiments",
+    locate run_dir, curl publish to IQ, upload artifact. No --plugin-dir
+    flags needed — the local Claude Code install resolves plugins from
+    ~/.claude/plugins/.
+  - .github/WORKFLOW_SETUP.md — rewritten with self-hosted runner setup
+    (PowerShell commands for download / configure / install as service
+    under the user's account).
+  - .github/disabled/workflows/evaluate-cloud-fallback.yml — preserves the
+    cloud-runner workflow intact for rollback. Has the bq shim, --plugin-dir
+    + --bare invocation, ADC restoration, plugin staging — all the
+    infrastructure that took several iterations to get right.
+  - .github/disabled/WORKFLOW_SETUP_CLOUD.md — preserves cloud setup docs.
+  - .github/scripts/{setup-plugins.sh,bq} — kept in place; only used by
+    the cloud-fallback workflow now but harmless when self-hosted is active.
+  - .github/scripts/publish-to-iq.sh — used by BOTH workflow variants;
+    pure curl, no MCP dependency, works identically on either runner type.
+
 0.8.2 — Vendor ab-experiments (GHE-only repo) into this repo for CI:
   - vendor/ab-experiments/ — snapshot of pcernik/claude-skills plugin from
     Groupon GHE (which GitHub Actions cloud runners can't reach because

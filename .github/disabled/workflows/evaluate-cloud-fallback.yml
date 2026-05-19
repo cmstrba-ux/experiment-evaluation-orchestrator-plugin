@@ -1,0 +1,240 @@
+name: Evaluate Review Experiments
+
+# Runs the experiment-evaluation orchestrator on a schedule and publishes the
+# resulting combined_report.html to Groupon IQ. Local-only flow in this repo
+# uses Claude Code interactively with full MCPs; this CI flow runs headless and
+# publishes via the IQ REST API (pure curl) so no IQ MCP install is needed.
+#
+# Required GitHub repo secrets (Settings → Secrets and variables → Actions):
+#   ANTHROPIC_API_KEY  — Claude API key. https://console.anthropic.com/
+#   IQ_API_KEY         — Groupon IQ personal token. https://iq.groupon.com/api-tokens
+#   GCP_ADC_JSON       — Contents of your local
+#                        %APPDATA%\gcloud\application_default_credentials.json
+#                        (after `gcloud auth application-default login`).
+#                        Acts as YOU in CI — same BQ permissions you have locally.
+#                        Refresh tokens last months unless revoked via
+#                        `gcloud auth application-default revoke` or org session policy.
+#                        Rotate when needed: revoke, re-login, re-paste the secret.
+#   GH_TOKEN           — github.com PAT with `repo` scope if seo-impact-plugin is private
+#                        (the auto-provided GITHUB_TOKEN won't work cross-repo)
+#
+# ab-experiments is vendored in vendor/ab-experiments/ (synced from
+# pcernik/claude-skills on Groupon GHE). No GHE access needed in CI.
+#
+# Auth approach: this workflow uses your gcloud user OAuth credentials instead of
+# Workload Identity Federation. Reason: WIF requires creating a workload identity
+# pool + GitHub provider in the GCP project, which most users don't have IAM admin
+# rights for. ADC user credentials work today with zero admin involvement, at the
+# cost of being tied to a single user (you). For production-grade automation
+# managed by an SRE team, switch to WIF once admin perms are available.
+
+on:
+  schedule:
+    # Mon, Wed, Fri at 11:00 UTC (= 12:00 Bratislava winter / 13:00 summer).
+    # Cron times are in UTC; adjust to taste.
+    - cron: '0 11 * * 1,3,5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Orchestrator mode (auto | explicit <name> | since YYYY-MM-DD)'
+        required: false
+        default: 'auto'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Only one run at a time on `main` — sequential runs prevent IQ publish races.
+  group: evaluate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # AB + SEO subagents on Opus, ~30-60 min total in our local runs
+
+    steps:
+      - name: Checkout orchestrator plugin
+        uses: actions/checkout@v4
+        with:
+          path: experiment-evaluation-orchestrator-plugin
+
+      - name: Set up gcloud + bq CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: bq
+
+      - name: Authenticate to Google Cloud (user OAuth via ADC)
+        env:
+          GCP_ADC_JSON: ${{ secrets.GCP_ADC_JSON }}
+          # Two distinct projects:
+          #   GCP_BILLING_PROJECT — where the BQ job RUNS (billed for slot-time /
+          #                        on-demand bytes). Matches the user's local
+          #                        `gcloud config list project` so CI behavior
+          #                        mirrors interactive use.
+          #   GCP_QUOTA_PROJECT  — quota attribution for API calls (Google client
+          #                        libs send this as the "user project" header).
+          #                        Comes from the ADC JSON's `quota_project_id`
+          #                        field by default; we override here so a future
+          #                        re-export of the ADC file can't silently
+          #                        shift CI's quota attribution.
+          GCP_BILLING_PROJECT: prj-grp-foundryai-dev-7c37
+          GCP_QUOTA_PROJECT: prj-grp-dataview-prod-1ff9
+        run: |
+          set -euo pipefail
+          if [[ -z "${GCP_ADC_JSON:-}" ]]; then
+            echo "::error::GCP_ADC_JSON secret is not set. See .github/WORKFLOW_SETUP.md for setup."
+            exit 1
+          fi
+          ADC_PATH="$HOME/.config/gcloud/application_default_credentials.json"
+          mkdir -p "$(dirname "$ADC_PATH")"
+          # Restore the user's application_default_credentials.json. The refresh_token
+          # inside is the leverage — `bq` swaps it for a short-lived access token on
+          # every invocation. We never log the file content (no `cat`, no `echo $JSON`).
+          # `printf '%s'` instead of `echo "$JSON"` to avoid any escape interpretation
+          # if the JSON contains backslashes or other tricky chars.
+          printf '%s' "$GCP_ADC_JSON" > "$ADC_PATH"
+          chmod 600 "$ADC_PATH"
+          # Sanity check: confirm the file parses as JSON and has a refresh_token.
+          # We use jq -e (exit nonzero on null/false) and only echo metadata, not the
+          # values themselves.
+          if ! jq -e '.refresh_token | length > 0' "$ADC_PATH" >/dev/null; then
+            echo "::error::GCP_ADC_JSON does not parse as JSON with a non-empty refresh_token."
+            echo "File size: $(wc -c < "$ADC_PATH") bytes."
+            echo "Keys present (values redacted): $(jq -r 'keys | join(",")' "$ADC_PATH" 2>&1 || echo PARSE_FAIL)"
+            exit 1
+          fi
+          echo "ADC file present at $ADC_PATH ($(wc -c < "$ADC_PATH") bytes), refresh_token length OK."
+          # Tell BOTH gcloud SDK AND `bq` to use this file:
+          #   GOOGLE_APPLICATION_CREDENTIALS               — generic ADC env (google-cloud client libs)
+          #   CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE       — gcloud SDK + `bq` auth override
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$ADC_PATH" >> "$GITHUB_ENV"
+          echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$ADC_PATH" >> "$GITHUB_ENV"
+          # Set the billing project so `bq` (and the shim) knows where to run jobs.
+          # Data lives cross-project in kbc-grpn-40-0cd2 + prj-grp-dataview-prod-1ff9;
+          # jobs bill to GCP_BILLING_PROJECT (slot-time / on-demand).
+          gcloud config set project "$GCP_BILLING_PROJECT"
+          # GOOGLE_CLOUD_QUOTA_PROJECT — Python google-cloud-* libs read this for the
+          # "user project" header in API calls. Overrides quota_project_id from the
+          # ADC JSON if present.
+          echo "GOOGLE_CLOUD_QUOTA_PROJECT=$GCP_QUOTA_PROJECT" >> "$GITHUB_ENV"
+          gcloud config list
+
+      - name: Verify bq shim is on PATH and ADC works
+        run: |
+          set -euo pipefail
+          # Confirm we're hitting the shim, not the gcloud SDK's bq.
+          echo "=== which bq ==="
+          which bq
+          # The shim is a Python script; --version returns the shim banner.
+          bq --version 2>&1 || true
+          echo ""
+          # `gcloud auth application-default print-access-token` should work — it's
+          # the basic ADC sanity check. Token length only, never the value.
+          echo "=== gcloud ADC token length (sanity check) ==="
+          TOKEN_LEN=$(gcloud auth application-default print-access-token 2>&1 | wc -c)
+          echo "Access token length: $TOKEN_LEN bytes"
+          echo ""
+          # Real cross-project query through the shim — confirms ADC credentials
+          # actually work for the datasets the orchestrator queries.
+          echo "=== bq test query through shim (cross-project read against test_definitions) ==="
+          bq query --use_legacy_sql=false --format=prettyjson --max_rows=1 \
+            'SELECT alternate_name FROM `kbc-grpn-40-0cd2.in_c_keboola_ex_google_drive_01kjaefgnqyrk1y6trtznth660.test_definitions` LIMIT 1' \
+            > /tmp/bq_test.json
+          cat /tmp/bq_test.json
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code CLI (headless)
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude --version
+
+      - name: Set up Python (for render.py + bq shim)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps (google-cloud-bigquery is what the bq shim uses)
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-docx pyarrow db-dtypes google-cloud-bigquery pandas numpy scipy
+
+      - name: Install bq shim (replaces gcloud SDK's bq for ADC user OAuth support)
+        # The gcloud SDK's `bq` won't use ADC user OAuth credentials — it requires
+        # an `active account` from `gcloud auth login` or a service account. The
+        # shim translates `bq query ...` invocations into google-cloud-bigquery
+        # Python calls, which DO honor ADC. Place the shim earlier on PATH so all
+        # subsequent `bq` invocations (including from claude subagents) hit it.
+        run: |
+          set -euo pipefail
+          mkdir -p /opt/bq-shim
+          cp experiment-evaluation-orchestrator-plugin/.github/scripts/bq /opt/bq-shim/bq
+          chmod +x /opt/bq-shim/bq
+          echo "/opt/bq-shim" >> "$GITHUB_PATH"
+          # Verify the shim is first on PATH (after $GITHUB_PATH propagates to the next step).
+          ls -la /opt/bq-shim/
+
+      - name: Install dependent plugins (ab-experiments vendored, seo-impact-plugin from gh.com)
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash experiment-evaluation-orchestrator-plugin/.github/scripts/setup-plugins.sh
+
+      - name: Run orchestrator (headless Claude Code)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Intentionally do NOT set IQ_API_KEY here. The skill's Step 11 detects
+          # this and skips MCP-based publish; the next workflow step does pure-curl
+          # publish using the IQ REST API instead.
+          MODE: ${{ inputs.mode || 'auto' }}
+        run: |
+          set -euo pipefail
+          mkdir -p temp/experiment-evaluation
+          # Headless plugin loading: use `--plugin-dir` flags (per-session load,
+          # bypasses installed_plugins.json registry which doesn't work in --print
+          # mode). `--bare` is the canonical headless mode — skips hooks, LSP,
+          # plugin sync, auto-memory, OAuth/keychain reads. Auth is strictly via
+          # ANTHROPIC_API_KEY env var. `--dangerously-skip-permissions` because the
+          # orchestrator runs Bash/Read/Write/Task tools throughout — there's no
+          # interactive prompter to approve them.
+          claude --bare --print \
+            --plugin-dir /tmp/plugins/ab-experiments \
+            --plugin-dir /tmp/plugins/seo-impact-plugin \
+            --plugin-dir /tmp/plugins/experiment-evaluation-orchestrator \
+            --add-dir "$GITHUB_WORKSPACE" \
+            --dangerously-skip-permissions \
+            "/experiment-evaluation-orchestrator:evaluate-reviews-experiments ${MODE}"
+
+      - name: Locate run_dir
+        id: run_dir
+        run: |
+          set -euo pipefail
+          RUN_DIR=$(find temp/experiment-evaluation -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          if [[ -z "$RUN_DIR" || ! -f "$RUN_DIR/combined_report.html" ]]; then
+            echo "::error::No combined_report.html found under temp/experiment-evaluation"
+            ls -la temp/experiment-evaluation/ || true
+            exit 1
+          fi
+          echo "run_dir=$RUN_DIR" >> "$GITHUB_OUTPUT"
+          echo "Located: $RUN_DIR"
+          ls -la "$RUN_DIR"
+
+      - name: Publish to Groupon IQ (pure curl, no MCP)
+        env:
+          IQ_API_KEY: ${{ secrets.IQ_API_KEY }}
+          RUN_DIR: ${{ steps.run_dir.outputs.run_dir }}
+        run: bash experiment-evaluation-orchestrator-plugin/.github/scripts/publish-to-iq.sh
+
+      - name: Upload combined report + summary as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-report-${{ github.run_id }}
+          path: |
+            temp/experiment-evaluation/*/combined_report.html
+            temp/experiment-evaluation/*/summary.md
+            temp/experiment-evaluation/*/passthrough/*.docx
+          retention-days: 30

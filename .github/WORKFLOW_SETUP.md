@@ -1,68 +1,88 @@
-# GitHub Actions setup — `Evaluate Review Experiments`
+# GitHub Actions setup — `Evaluate Review Experiments` (self-hosted runner)
 
-The workflow at `.github/workflows/evaluate.yml` runs the orchestrator on a Mon/Wed/Fri 11:00 UTC cron and publishes the combined HTML report to Groupon IQ. Once these one-time setup steps are done, daily runs are zero-touch.
+The active workflow at `.github/workflows/evaluate.yml` runs on a **self-hosted GitHub Actions runner installed on your local Windows machine** so it uses your existing OAuth/Max Claude Code login. No pay-per-token API key, no plugin re-clone, no `bq` shim — your local Claude Code, local `bq`, and locally-installed plugins do the work.
 
-**Auth approach**: this workflow uses your gcloud user OAuth credentials (Application Default Credentials) instead of Workload Identity Federation. Reason: WIF requires creating a workload identity pool in your GCP project, which most users don't have IAM admin rights for. ADC works today with zero admin involvement, at the cost of being tied to a single user (you). For production-grade automation managed by an SRE team, switch to WIF once admin perms are available.
+> Cloud-runner rollback: if you ever want to switch back to a GitHub-hosted runner with `ANTHROPIC_API_KEY`, see `.github/disabled/workflows/evaluate-cloud-fallback.yml` and `.github/disabled/WORKFLOW_SETUP_CLOUD.md`. Move the workflow file back into `.github/workflows/`, swap the docs, and add the cloud secrets.
 
 ## TL;DR
 
-1. Export your gcloud Application Default Credentials JSON (one command).
-2. Add 4 secrets to this repo's GitHub Actions settings.
+1. Install the GitHub Actions runner on your Windows box as a service (~10 min).
+2. Add `IQ_API_KEY` as a GitHub secret.
 3. Trigger the workflow manually once to verify.
 
 ---
 
-## 1. Export your gcloud ADC credentials
+## 1. Install the self-hosted runner
 
-On the machine where `bq` works today (your usual dev box):
+### a. Get the runner package
+
+1. GitHub repo → **Settings** → **Actions** → **Runners** → **New self-hosted runner**.
+2. Pick **Windows x64**.
+3. GitHub shows you a one-time registration token + Invoke-WebRequest / config commands. Keep the page open.
+
+### b. Configure under your user account
+
+Open **PowerShell as yourself** (NOT as admin — the runner needs your user's Claude/gcloud auth):
 
 ```powershell
-# If you've never run `gcloud auth application-default login`, do it now:
-gcloud auth application-default login
-# A browser opens; sign in with your Groupon account.
+mkdir C:\actions-runner; cd C:\actions-runner
 
-# The credentials are now at this path. Open in Notepad:
-notepad $env:APPDATA\gcloud\application_default_credentials.json
-# Select all → Copy. Don't paste into chat; paste directly into the GitHub secret UI.
+# Download (replace 2.319.1 with the version GitHub shows).
+Invoke-WebRequest -Uri https://github.com/actions/runner/releases/download/v2.319.1/actions-runner-win-x64-2.319.1.zip -OutFile actions-runner.zip
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory("$PWD\actions-runner.zip", "$PWD")
+
+# Register with the repo (use the token from the GitHub page).
+./config.cmd --url https://github.com/cmstrba-ux/experiment-evaluation-orchestrator-plugin --token <REPO_TOKEN>
+# When prompted for labels, ACCEPT defaults — the workflow targets [self-hosted, windows].
 ```
 
-The file contains a `refresh_token` that grants long-lived access. Treat it like a password.
+### c. Install as a Windows service (so it survives logout)
 
-**Rotation**: when the token gets invalidated (you run `gcloud auth application-default revoke`, your Google session expires from org policy, or you change your password), the CI will start failing 401s. To rotate: revoke locally, re-login, re-paste the new JSON into the `GCP_ADC_JSON` GitHub secret.
+```powershell
+# Run the service as YOUR account so it inherits your claude OAuth + gcloud login.
+./svc.cmd install YOURDOMAIN\miro    # or .\miro for local accounts
+./svc.cmd start
+```
+
+To check / control later:
+```powershell
+./svc.cmd status
+./svc.cmd stop
+```
+
+### d. Verify
+
+1. GitHub repo → **Settings** → **Actions** → **Runners**. Your machine should show as `Idle` (green dot).
+2. Open a fresh PowerShell as your user and confirm `claude --version`, `bq version`, and `curl --version` all work. The runner inherits that environment, so anything that works for you works for the workflow.
 
 ---
 
-## 2. Add GitHub repo secrets
+## 2. Add the IQ_API_KEY secret
 
-Settings → Secrets and variables → Actions → **New repository secret**. Add all 4 (+1 optional):
+Settings → Secrets and variables → Actions → **New repository secret**:
 
-| Secret | Value | How to get |
+| Secret | Value | Source |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | `sk-ant-…` | https://console.anthropic.com/settings/keys |
-| `IQ_API_KEY` | Groupon IQ personal token | Copy from your local `~/.claude/settings.json` `env.IQ_API_KEY`, or mint a new one at https://iq.groupon.com/api-tokens |
-| `GCP_ADC_JSON` | Contents of the JSON file from step 1 | Paste the whole file content (including `{` and `}`) |
-| `GH_TOKEN` *(optional)* | github.com PAT with `repo` scope, only if `c-pacharya-groupon/seo-impact-plugin` is private | https://github.com/settings/tokens |
+| `IQ_API_KEY` | Your Groupon IQ personal token | Copy from `~/.claude/settings.json` `env.IQ_API_KEY` |
 
-> The auto-provided `GITHUB_TOKEN` only has access to *this* repo — for cloning other public/private repos you must use a separate PAT. If `seo-impact-plugin` is fully public, you can omit `GH_TOKEN`.
-
-> The `ab-experiments` plugin is **vendored** in `vendor/ab-experiments/` of this repo (it lives on Groupon's GHE which is VPN-only, unreachable from GitHub Actions cloud runners). To refresh the vendored copy when upstream changes, see `vendor/ab-experiments/REFRESH.md`.
+That's the only secret. Claude auth via your local OAuth; `bq` auth via your local gcloud OAuth; plugins via your local install.
 
 ---
 
 ## 3. Test it
 
-1. Push the workflow to `main` (already committed in `0.8.0`).
-2. Actions tab → **Evaluate Review Experiments** → **Run workflow** → pick `main` → Run.
-3. Watch the job run. Expected ~30-60 min.
+1. Push this workflow to `main` (already committed in `0.8.3`).
+2. Actions tab → **Evaluate Review Experiments** → **Run workflow** → pick `main` → set `mode` (e.g., `explicit FAQ reviews - 8k - before change` for a single experiment) → Run.
+3. Expected runtime ~30-60 min, same as a manual local invocation.
 4. On success:
-   - HTML artifact downloadable from the run page (kept 30 days).
-   - Groupon IQ report at the canonical title `Experiment Evaluation Combined Report — YYYY-MM-DD` (versioned if a same-day run already exists).
-5. If it fails:
-   - **`bq query` returns 401 / 403** → `GCP_ADC_JSON` expired or your account lost permissions. Re-export from your local box and update the secret.
-   - **`bq query` returns "project not found"** → the billing project in the workflow (`prj-grp-foundryai-dev-7c37`) might not exist or you lost access. Edit the workflow's `GCP_BILLING_PROJECT` constant.
-   - **plugin install fails** → `GHE_TOKEN` lacks `repo` scope or is expired.
-   - **Claude run fails** → `ANTHROPIC_API_KEY` is missing or hit rate limit / out of credits.
-   - **IQ publish fails** → `IQ_API_KEY` expired. Test locally with: `curl -X POST -H "g-api-key: $IQ_API_KEY" -d '{}' -H 'Content-Type: application/json' https://api.enc.groupon.com/reports/list`.
+   - Combined report as a workflow artifact (kept 30 days).
+   - Groupon IQ updated at `Experiment Evaluation Combined Report — YYYY-MM-DD`.
+5. On failure: most issues are environment, not code:
+   - **`claude` not found** → service running as wrong user. Reinstall with `./svc.cmd install <YOUR_USER>`.
+   - **`bq` auth fails** → local gcloud session expired. Run `gcloud auth login` in PowerShell as your user.
+   - **Slash command not found** → plugin not installed locally. Run `/plugin install experiment-evaluation-orchestrator@miro-personal` from your interactive Claude Code session.
+   - **IQ publish fails** → `IQ_API_KEY` secret missing or expired.
 
 ---
 
@@ -83,36 +103,42 @@ Common patterns:
 
 ---
 
-## What's different from a local run
+## 5. If your machine is off at cron time
 
-| | Local | CI |
+GitHub queues the scheduled run until a matching runner comes online, then dispatches. The job times out at 120 minutes (configurable). So:
+
+- **Sleep / brief reboots**: fine — the queued run kicks off when your runner reconnects.
+- **Off for hours**: the run waits in the queue; if you exceed the timeout it's cancelled. Trigger manually when you're back online.
+- **Off for days**: install on an always-on box (a NAS, a Linux mini-PC, or eventually a cheap VPS — Linux runner is the same workflow, just change `runs-on:` to `[self-hosted, linux]` and update the `WORKSPACE_DIR` / `PLUGIN_DIR` env vars to Linux paths).
+
+---
+
+## 6. What's different from a local manual run
+
+| | Manual local run | Self-hosted CI run |
 |---|---|---|
-| MCP servers | Full set (groupon-iq, datacatalog, etc.) | None — pure curl for IQ |
-| Plugin install | Persistent in `~/.claude/plugins/` | Re-cloned every run from upstream repos |
-| BQ auth | Your `gcloud` OAuth (auto-renewed in your shell) | Same OAuth via ADC, restored from a GitHub secret |
-| Output location | `temp/experiment-evaluation/` or `<project>/deliverables/` | Workflow runner workspace (artifacted after) |
-| IQ publish | Skill Step 11 via MCP | Skill Step 11 skipped (IQ_API_KEY unset for Claude); workflow does curl publish |
-| Cost | Your Claude session | Anthropic API key billing for Claude Code CLI |
+| Trigger | You type `/evaluate-reviews-experiments` | Cron or workflow_dispatch from GitHub UI |
+| Claude auth | Your OAuth | Your OAuth (same install, same login) |
+| `bq` auth | Your gcloud | Your gcloud (same) |
+| Plugin install | `~/.claude/plugins/` | `~/.claude/plugins/` (same) |
+| IQ publish | Skill Step 11 via MCP | Pure curl via `.github/scripts/publish-to-iq.sh` (skill Step 11 skipped — IQ_API_KEY intentionally unset for the Claude run) |
+| Cost | Your Claude subscription | Your Claude subscription (same — no separate API tokens) |
+
+The CI run is essentially a scheduled `claude --print "/experiment-evaluation-orchestrator:evaluate-reviews-experiments"` followed by a curl IQ upload, both on your machine. Same auth, same code, just automated.
 
 ---
 
-## Cost expectations
+## 7. Updating the plugin code
 
-Each run dispatches ~6 Opus subagents (3 experiments × {AB, deal_charts}; +SEO when ≥14 days). Rough estimate from local runs:
-- 2-3M tokens per full run
-- ~$15-30 per run at current Claude Opus pricing
-- Mon/Wed/Fri = ~12 runs/month = ~$180-360/month
+The workflow's "Update plugin from origin/main (if clean working tree)" step runs `git pull` in the live install location before each run. So:
 
-If this is too high, options:
-- Reduce frequency to weekly
-- Use Sonnet for non-narrative subagents (verdict logic only needs Sonnet; only the .docx passthrough genuinely benefits from Opus)
-- Skip the .docx passthrough step entirely
+- **Most of the time**: latest committed code on `main` is used automatically.
+- **If you have uncommitted local edits** in `~/.claude/plugins/local-marketplaces/miro-personal/plugins/experiment-evaluation-orchestrator/`: the step skips the reset with a warning and uses your local state. Commit or stash before scheduled runs if you want pure latest behavior.
 
 ---
 
-## Security notes
+## 8. Security notes
 
-- **The `GCP_ADC_JSON` secret IS you** in CI. Anyone with write access to this repo's secrets (or anyone who can trigger workflow runs that print the secret accidentally) can act as your gcloud identity. Treat the secret with the same care as your laptop's gcloud login.
-- **The workflow never logs the secret content** — no `echo "$GCP_ADC_JSON"`, no `cat` of the JSON file. If you add debug steps later, keep that contract.
-- **GitHub masks secrets in logs** by default, but only known secret values — if you write the value through string interpolation that changes the format, masking can miss. Stick to env-var passing.
-- **When you leave Groupon** or rotate your account, run `gcloud auth application-default revoke` locally — that invalidates the refresh token AND the CI secret in one step.
+- **Runner runs as you**: the GH Actions service inherits your user permissions. Don't give push access to the repo to anyone you wouldn't lend your laptop to.
+- **`IQ_API_KEY` is yours**: anyone who can trigger workflow runs OR has write access to repo secrets can publish to IQ as you.
+- **No remote secret material on your box**: the runner only stores its own GitHub registration token. Your Claude OAuth and gcloud creds stay in your user profile, untouched.
