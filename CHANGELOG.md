@@ -1,3 +1,26 @@
+0.8.1 — bq shim so ADC user OAuth credentials work in headless CI:
+  - The gcloud SDK's `bq` CLI refuses to use ADC user OAuth credentials with
+    "no active account selected" — it requires either `gcloud auth login`
+    (interactive, impossible in CI) or a service account JSON. Most analysts
+    don't have admin perms to create the SA, so the ADC path is the only
+    option that doesn't require admin involvement, but `bq` can't consume it.
+  - .github/scripts/bq — Python shim that translates `bq query ...` invocations
+    into google-cloud-bigquery Python client calls. The Python BQ client
+    natively honors GOOGLE_APPLICATION_CREDENTIALS / ADC, so user refresh tokens
+    just work. Supports the orchestrator's actual usage:
+      --use_legacy_sql=false / --format=prettyjson / --max_rows=N
+      --parameter='NAME:TYPE:VALUE' for scalar types (STRING, BOOL, INT64,
+      FLOAT64, DATE, TIMESTAMP), ARRAY<scalar>, and ARRAY<STRUCT<...>>.
+    Output is JSON in the same shape `bq --format=prettyjson` produces
+    (numbers stringified, dates ISO), so render.py and downstream code work
+    unchanged.
+  - .github/workflows/evaluate.yml — install step prepends /opt/bq-shim to
+    PATH BEFORE the gcloud SDK setup. The verification step now runs through
+    the shim, so a failing shim surfaces immediately instead of failing
+    mid-run after Claude has burned tokens. Subagents that shell out to
+    `bq query ...` transparently route through the shim — no orchestrator
+    code changes.
+
 0.8.0 — GitHub Actions deployment + curl-only IQ publish (CI-friendly):
   - .github/workflows/evaluate.yml — Mon/Wed/Fri 11:00 UTC cron + manual trigger.
     Authenticates to GCP via Workload Identity Federation (no static SA keys),

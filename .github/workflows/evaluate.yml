@@ -103,21 +103,24 @@ jobs:
           gcloud config set project "$GCP_BILLING_PROJECT"
           gcloud config list
 
-      - name: Verify gcloud + bq are authenticated
+      - name: Verify bq shim is on PATH and ADC works
         run: |
           set -euo pipefail
-          # `gcloud auth list` should show the user OAuth account from the ADC file.
-          # If it shows "No credentialed accounts" the ADC override didn't take.
-          echo "=== gcloud auth list ==="
-          gcloud auth list 2>&1 || true
+          # Confirm we're hitting the shim, not the gcloud SDK's bq.
+          echo "=== which bq ==="
+          which bq
+          # The shim is a Python script; --version returns the shim banner.
+          bq --version 2>&1 || true
           echo ""
-          echo "=== gcloud auth print-access-token (length only, value redacted) ==="
+          # `gcloud auth application-default print-access-token` should work — it's
+          # the basic ADC sanity check. Token length only, never the value.
+          echo "=== gcloud ADC token length (sanity check) ==="
           TOKEN_LEN=$(gcloud auth application-default print-access-token 2>&1 | wc -c)
           echo "Access token length: $TOKEN_LEN bytes"
           echo ""
-          # Real cross-project query — confirms the credentials actually work for the
-          # datasets the orchestrator queries.
-          echo "=== bq test query (cross-project read against test_definitions) ==="
+          # Real cross-project query through the shim — confirms ADC credentials
+          # actually work for the datasets the orchestrator queries.
+          echo "=== bq test query through shim (cross-project read against test_definitions) ==="
           bq query --use_legacy_sql=false --format=prettyjson --max_rows=1 \
             'SELECT alternate_name FROM `kbc-grpn-40-0cd2.in_c_keboola_ex_google_drive_01kjaefgnqyrk1y6trtznth660.test_definitions` LIMIT 1' \
             > /tmp/bq_test.json
@@ -133,15 +136,30 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude --version
 
-      - name: Set up Python (for render.py)
+      - name: Set up Python (for render.py + bq shim)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python deps (python-docx for c3 passthrough .docx parsing)
+      - name: Install Python deps (google-cloud-bigquery is what the bq shim uses)
         run: |
           python -m pip install --upgrade pip
           pip install python-docx pyarrow db-dtypes google-cloud-bigquery pandas numpy scipy
+
+      - name: Install bq shim (replaces gcloud SDK's bq for ADC user OAuth support)
+        # The gcloud SDK's `bq` won't use ADC user OAuth credentials — it requires
+        # an `active account` from `gcloud auth login` or a service account. The
+        # shim translates `bq query ...` invocations into google-cloud-bigquery
+        # Python calls, which DO honor ADC. Place the shim earlier on PATH so all
+        # subsequent `bq` invocations (including from claude subagents) hit it.
+        run: |
+          set -euo pipefail
+          mkdir -p /opt/bq-shim
+          cp experiment-evaluation-orchestrator-plugin/.github/scripts/bq /opt/bq-shim/bq
+          chmod +x /opt/bq-shim/bq
+          echo "/opt/bq-shim" >> "$GITHUB_PATH"
+          # Verify the shim is first on PATH (after $GITHUB_PATH propagates to the next step).
+          ls -la /opt/bq-shim/
 
       - name: Install dependent plugins (ab-experiments from GHE, seo-impact-plugin from gh.com)
         env:
