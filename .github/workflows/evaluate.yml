@@ -6,24 +6,26 @@ name: Evaluate Review Experiments
 # publishes via the IQ REST API (pure curl) so no IQ MCP install is needed.
 #
 # Required GitHub repo secrets (Settings → Secrets and variables → Actions):
-#   ANTHROPIC_API_KEY           — Claude API key. https://console.anthropic.com/
-#   IQ_API_KEY                  — Groupon IQ personal token. https://iq.groupon.com/api-tokens
-#   GCP_WORKLOAD_IDENTITY_PROVIDER — projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
-#   GCP_SERVICE_ACCOUNT         — <name>@<project>.iam.gserviceaccount.com (impersonated via WIF)
-#   GHE_TOKEN                   — github.groupondev.com PAT with `repo` scope on pcernik/claude-skills
-#                                 (used to clone ab-experiments plugin from GHE)
-#   GH_TOKEN                    — github.com PAT with `repo` scope if seo-impact-plugin is private
-#                                 (the auto-provided GITHUB_TOKEN won't work cross-repo)
+#   ANTHROPIC_API_KEY  — Claude API key. https://console.anthropic.com/
+#   IQ_API_KEY         — Groupon IQ personal token. https://iq.groupon.com/api-tokens
+#   GCP_ADC_JSON       — Contents of your local
+#                        %APPDATA%\gcloud\application_default_credentials.json
+#                        (after `gcloud auth application-default login`).
+#                        Acts as YOU in CI — same BQ permissions you have locally.
+#                        Refresh tokens last months unless revoked via
+#                        `gcloud auth application-default revoke` or org session policy.
+#                        Rotate when needed: revoke, re-login, re-paste the secret.
+#   GHE_TOKEN          — github.groupondev.com PAT with `repo` scope on pcernik/claude-skills
+#                        (used to clone ab-experiments plugin from GHE)
+#   GH_TOKEN           — github.com PAT with `repo` scope if seo-impact-plugin is private
+#                        (the auto-provided GITHUB_TOKEN won't work cross-repo)
 #
-# WIF setup outside this repo (one-time, done in GCP console):
-#   1. Create a Workload Identity Pool + GitHub OIDC provider in your GCP project.
-#   2. Pick or create a service account with BigQuery Job User (workspace project)
-#      + BigQuery Data Viewer on the source datasets:
-#        - kbc-grpn-40-0cd2 (L3 Product Analytics — orchestrator queue, AB tables)
-#        - kbc-grpn-35 (L2 UE)         — if needed for upstream tables
-#        - prj-grp-dataview-prod-1ff9  (SEO datamart + GSC)
-#   3. Grant the GitHub OIDC principal `roles/iam.workloadIdentityUser` on the SA.
-#   4. Set GCP_WORKLOAD_IDENTITY_PROVIDER + GCP_SERVICE_ACCOUNT secrets above.
+# Auth approach: this workflow uses your gcloud user OAuth credentials instead of
+# Workload Identity Federation. Reason: WIF requires creating a workload identity
+# pool + GitHub provider in the GCP project, which most users don't have IAM admin
+# rights for. ADC user credentials work today with zero admin involvement, at the
+# cost of being tied to a single user (you). For production-grade automation
+# managed by an SRE team, switch to WIF once admin perms are available.
 
 on:
   schedule:
@@ -37,11 +39,8 @@ on:
         required: false
         default: 'auto'
 
-# Workload Identity Federation needs id-token: write. contents: read is enough
-# for the actions/checkout step.
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   # Only one run at a time on `main` — sequential runs prevent IQ publish races.
@@ -59,23 +58,43 @@ jobs:
         with:
           path: experiment-evaluation-orchestrator-plugin
 
-      - name: Authenticate to Google Cloud (Workload Identity Federation)
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
       - name: Set up gcloud + bq CLI
         uses: google-github-actions/setup-gcloud@v2
         with:
           install_components: bq
 
+      - name: Authenticate to Google Cloud (user OAuth via ADC)
+        env:
+          GCP_ADC_JSON: ${{ secrets.GCP_ADC_JSON }}
+          GCP_BILLING_PROJECT: prj-grp-foundryai-dev-7c37  # where BQ jobs bill to
+        run: |
+          set -euo pipefail
+          if [[ -z "${GCP_ADC_JSON:-}" ]]; then
+            echo "::error::GCP_ADC_JSON secret is not set. See .github/WORKFLOW_SETUP.md for setup."
+            exit 1
+          fi
+          mkdir -p "$HOME/.config/gcloud"
+          # Restore the user's application_default_credentials.json. The refresh_token
+          # inside is the leverage — `bq` swaps it for a short-lived access token on
+          # every invocation. We never log the file content (no `cat`, no `echo`).
+          echo "$GCP_ADC_JSON" > "$HOME/.config/gcloud/application_default_credentials.json"
+          chmod 600 "$HOME/.config/gcloud/application_default_credentials.json"
+          # bq + gcloud SDK both honor GOOGLE_APPLICATION_CREDENTIALS for ADC lookup.
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/application_default_credentials.json" >> "$GITHUB_ENV"
+          # Set the billing project so `bq` knows where to run jobs from (data lives
+          # cross-project in kbc-grpn-40-0cd2 + prj-grp-dataview-prod-1ff9; jobs bill
+          # to this project).
+          gcloud config set project "$GCP_BILLING_PROJECT"
+
       - name: Verify bq is authenticated
         run: |
           set -euo pipefail
+          # The query intentionally hits an external dataset to confirm cross-project
+          # read works — not just same-project trivial SELECT.
           bq query --use_legacy_sql=false --format=prettyjson --max_rows=1 \
-            'SELECT CURRENT_TIMESTAMP() AS now' > /tmp/bq_test.json
-          echo "bq test query:"
+            'SELECT alternate_name FROM `kbc-grpn-40-0cd2.in_c_keboola_ex_google_drive_01kjaefgnqyrk1y6trtznth660.test_definitions` LIMIT 1' \
+            > /tmp/bq_test.json
+          echo "bq test query (first row of test_definitions):"
           cat /tmp/bq_test.json
 
       - name: Set up Node.js 20

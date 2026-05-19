@@ -2,100 +2,46 @@
 
 The workflow at `.github/workflows/evaluate.yml` runs the orchestrator on a Mon/Wed/Fri 11:00 UTC cron and publishes the combined HTML report to Groupon IQ. Once these one-time setup steps are done, daily runs are zero-touch.
 
+**Auth approach**: this workflow uses your gcloud user OAuth credentials (Application Default Credentials) instead of Workload Identity Federation. Reason: WIF requires creating a workload identity pool in your GCP project, which most users don't have IAM admin rights for. ADC works today with zero admin involvement, at the cost of being tied to a single user (you). For production-grade automation managed by an SRE team, switch to WIF once admin perms are available.
+
 ## TL;DR
 
-1. Configure Workload Identity Federation in GCP (one-time, ~15 min).
-2. Add 5 secrets to this repo's GitHub Actions settings.
-3. Trigger the workflow manually once to verify (Actions → Evaluate Review Experiments → Run workflow).
+1. Export your gcloud Application Default Credentials JSON (one command).
+2. Add 4 secrets to this repo's GitHub Actions settings.
+3. Trigger the workflow manually once to verify.
 
 ---
 
-## 1. Workload Identity Federation (GCP side)
+## 1. Export your gcloud ADC credentials
 
-WIF lets GitHub Actions impersonate a GCP service account without storing static JSON keys. ~15-20 min one-time.
+On the machine where `bq` works today (your usual dev box):
 
-### a. Create the WIF pool + GitHub provider
+```powershell
+# If you've never run `gcloud auth application-default login`, do it now:
+gcloud auth application-default login
+# A browser opens; sign in with your Groupon account.
 
-```bash
-# Run these locally with gcloud authenticated as a project owner.
-export PROJECT_ID="your-gcp-project-id"
-export POOL_ID="github-actions"
-export PROVIDER_ID="github"
-
-gcloud iam workload-identity-pools create "$POOL_ID" \
-  --project="$PROJECT_ID" \
-  --location="global" \
-  --display-name="GitHub Actions"
-
-gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_ID" \
-  --project="$PROJECT_ID" \
-  --location="global" \
-  --workload-identity-pool="$POOL_ID" \
-  --display-name="GitHub" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository == 'cmstrba-ux/experiment-evaluation-orchestrator-plugin'" \
-  --issuer-uri="https://token.actions.githubusercontent.com"
+# The credentials are now at this path. Open in Notepad:
+notepad $env:APPDATA\gcloud\application_default_credentials.json
+# Select all → Copy. Don't paste into chat; paste directly into the GitHub secret UI.
 ```
 
-### b. Pick or create a service account
+The file contains a `refresh_token` that grants long-lived access. Treat it like a password.
 
-```bash
-export SA_NAME="orchestrator-ci"
-export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-gcloud iam service-accounts create "$SA_NAME" \
-  --project="$PROJECT_ID" \
-  --display-name="Experiment evaluation orchestrator CI"
-```
-
-### c. Grant BQ permissions
-
-```bash
-# Workspace project — for running queries (BQ Job User).
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:$SA_EMAIL" \
-  --role="roles/bigquery.jobUser"
-
-# Source datasets — Data Viewer on each one the orchestrator reads.
-for dataset_project in kbc-grpn-40-0cd2 kbc-grpn-35 prj-grp-dataview-prod-1ff9; do
-  gcloud projects add-iam-policy-binding "$dataset_project" \
-    --member="serviceAccount:$SA_EMAIL" \
-    --role="roles/bigquery.dataViewer"
-done
-```
-
-### d. Bind the GitHub provider to the service account
-
-```bash
-export REPO="cmstrba-ux/experiment-evaluation-orchestrator-plugin"
-export POOL_FULL="projects/$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')/locations/global/workloadIdentityPools/$POOL_ID"
-
-gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
-  --project="$PROJECT_ID" \
-  --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/$POOL_FULL/attribute.repository/$REPO"
-```
-
-### e. Capture two values you need
-
-```bash
-echo "GCP_WORKLOAD_IDENTITY_PROVIDER = $POOL_FULL/providers/$PROVIDER_ID"
-echo "GCP_SERVICE_ACCOUNT            = $SA_EMAIL"
-```
+**Rotation**: when the token gets invalidated (you run `gcloud auth application-default revoke`, your Google session expires from org policy, or you change your password), the CI will start failing 401s. To rotate: revoke locally, re-login, re-paste the new JSON into the `GCP_ADC_JSON` GitHub secret.
 
 ---
 
 ## 2. Add GitHub repo secrets
 
-Settings → Secrets and variables → Actions → **New repository secret**. Add all 5:
+Settings → Secrets and variables → Actions → **New repository secret**. Add all 4 (+1 optional):
 
 | Secret | Value | How to get |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `sk-ant-…` | https://console.anthropic.com/settings/keys |
-| `IQ_API_KEY` | Groupon IQ personal token | https://iq.groupon.com/api-tokens |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | from step 1.e | — |
-| `GCP_SERVICE_ACCOUNT` | from step 1.e | — |
-| `GHE_TOKEN` | github.groupondev.com PAT with `repo` scope on `pcernik/claude-skills` | https://github.groupondev.com/settings/tokens |
+| `IQ_API_KEY` | Groupon IQ personal token | Copy from your local `~/.claude/settings.json` `env.IQ_API_KEY`, or mint a new one at https://iq.groupon.com/api-tokens |
+| `GCP_ADC_JSON` | Contents of the JSON file from step 1 | Paste the whole file content (including `{` and `}`) |
+| `GHE_TOKEN` | github.groupondev.com PAT with `repo` scope on `pcernik/claude-skills` | https://github.groupondev.com/settings/tokens — pick `repo` scope, set expiration to your comfort level |
 | `GH_TOKEN` *(optional)* | github.com PAT with `repo` scope, only if `c-pacharya-groupon/seo-impact-plugin` is private | https://github.com/settings/tokens |
 
 > The auto-provided `GITHUB_TOKEN` only has access to *this* repo — for cloning other public/private repos you must use a separate PAT. If `seo-impact-plugin` is fully public, you can omit `GH_TOKEN`.
@@ -105,16 +51,17 @@ Settings → Secrets and variables → Actions → **New repository secret**. Ad
 ## 3. Test it
 
 1. Push the workflow to `main` (already committed in `0.8.0`).
-2. Actions tab → **Evaluate Review Experiments** → **Run workflow** → Run.
+2. Actions tab → **Evaluate Review Experiments** → **Run workflow** → pick `main` → Run.
 3. Watch the job run. Expected ~30-60 min.
 4. On success:
    - HTML artifact downloadable from the run page (kept 30 days).
    - Groupon IQ report at the canonical title `Experiment Evaluation Combined Report — YYYY-MM-DD` (versioned if a same-day run already exists).
 5. If it fails:
-   - **bq auth fails** → check the WIF pool's attribute-condition matches your repo path.
-   - **plugin install fails** → check `GHE_TOKEN` has `repo` scope and isn't expired.
-   - **Claude run fails** → check `ANTHROPIC_API_KEY` is set and has model access.
-   - **IQ publish fails** → check `IQ_API_KEY` is valid (`curl -H "g-api-key: $IQ_API_KEY" https://api.enc.groupon.com/reports/list -X POST -d '{}' -H 'Content-Type: application/json'`).
+   - **`bq query` returns 401 / 403** → `GCP_ADC_JSON` expired or your account lost permissions. Re-export from your local box and update the secret.
+   - **`bq query` returns "project not found"** → the billing project in the workflow (`prj-grp-foundryai-dev-7c37`) might not exist or you lost access. Edit the workflow's `GCP_BILLING_PROJECT` constant.
+   - **plugin install fails** → `GHE_TOKEN` lacks `repo` scope or is expired.
+   - **Claude run fails** → `ANTHROPIC_API_KEY` is missing or hit rate limit / out of credits.
+   - **IQ publish fails** → `IQ_API_KEY` expired. Test locally with: `curl -X POST -H "g-api-key: $IQ_API_KEY" -d '{}' -H 'Content-Type: application/json' https://api.enc.groupon.com/reports/list`.
 
 ---
 
@@ -141,7 +88,7 @@ Common patterns:
 |---|---|---|
 | MCP servers | Full set (groupon-iq, datacatalog, etc.) | None — pure curl for IQ |
 | Plugin install | Persistent in `~/.claude/plugins/` | Re-cloned every run from upstream repos |
-| BQ auth | Your `gcloud` OAuth | Workload Identity Federation impersonates the SA |
+| BQ auth | Your `gcloud` OAuth (auto-renewed in your shell) | Same OAuth via ADC, restored from a GitHub secret |
 | Output location | `temp/experiment-evaluation/` or `<project>/deliverables/` | Workflow runner workspace (artifacted after) |
 | IQ publish | Skill Step 11 via MCP | Skill Step 11 skipped (IQ_API_KEY unset for Claude); workflow does curl publish |
 | Cost | Your Claude session | Anthropic API key billing for Claude Code CLI |
@@ -159,3 +106,12 @@ If this is too high, options:
 - Reduce frequency to weekly
 - Use Sonnet for non-narrative subagents (verdict logic only needs Sonnet; only the .docx passthrough genuinely benefits from Opus)
 - Skip the .docx passthrough step entirely
+
+---
+
+## Security notes
+
+- **The `GCP_ADC_JSON` secret IS you** in CI. Anyone with write access to this repo's secrets (or anyone who can trigger workflow runs that print the secret accidentally) can act as your gcloud identity. Treat the secret with the same care as your laptop's gcloud login.
+- **The workflow never logs the secret content** — no `echo "$GCP_ADC_JSON"`, no `cat` of the JSON file. If you add debug steps later, keep that contract.
+- **GitHub masks secrets in logs** by default, but only known secret values — if you write the value through string interpolation that changes the format, masking can miss. Stick to env-var passing.
+- **When you leave Groupon** or rotate your account, run `gcloud auth application-default revoke` locally — that invalidates the refresh token AND the CI secret in one step.
