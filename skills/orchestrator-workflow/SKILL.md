@@ -27,26 +27,26 @@ description: Top-level workflow for evaluating a queue of experiments. Reads tes
    - **Model rule**: never downgrade to Sonnet inside this orchestrator. All three subagents need consistent reasoning depth (verdict synthesis, SRM remediation, narrative interpretation); cost is the explicit tradeoff for run-to-run consistency.
 9. **Verify outputs.** Each expected JSON exists; if a subagent failed, the JSON contains `{"status":"failed","reason":...}` rather than missing. Log failures, continue.
 10. **render-combined-report** on `<run_dir>` with `--run-id` and `--data-through`.
-11. **Publish to Groupon IQ via the `mcp__groupon-iq__upload_report` MCP tool** (single canonical link per run-date; reruns on the same day version that one report instead of spawning siblings). Title format: `Experiment Evaluation Combined Report — YYYY-MM-DD` (em-dash `—`, not hyphen) where the date is the **YYYY-MM-DD prefix of run_id** (the day the orchestrator ran). NOT data_through (data freshness drifts on reruns even when the analyst's intent is the same publication), NOT the experiment names — the canonical link is "today's combined evaluation run", and versioning is the dedup mechanism. Steps:
+11. **Publish to Groupon IQ via a dedicated upload subagent** (single canonical link per run-date; reruns on the same day version that one report instead of spawning siblings). Title format: `Experiment Evaluation Combined Report — YYYY-MM-DD` (em-dash `—`, not hyphen) where the date is the **YYYY-MM-DD prefix of run_id** (the day the orchestrator ran). NOT data_through (data freshness drifts on reruns even when the analyst's intent is the same publication), NOT the experiment names — the canonical link is "today's combined evaluation run", and versioning is the dedup mechanism. Steps:
 
-    1. Compute the date string from `run_id` (first 10 chars, YYYY-MM-DD).
-    2. Base64-encode `<run_dir>/combined_report.html` (a ~350 KB HTML produces a ~470 KB base64 string, well under the MCP tool's 5 MB cap):
+    1. Compute the date string from `run_id` (first 10 chars, YYYY-MM-DD). Title = `"Experiment Evaluation Combined Report — <YYYY-MM-DD>"`.
+    2. Dispatch a single subagent (Task tool, `subagent_type=general-purpose`, `model=opus`) with a self-contained prompt instructing it to:
+       1. Read `<run_dir>/combined_report.html` from disk and base64-encode it.
+       2. Call `mcp__groupon-iq__upload_report` with:
+          - `title = "Experiment Evaluation Combined Report — <YYYY-MM-DD>"`
+          - `html_file_base64 = <the base64 string from step 1>`
+          - `folder_id = "dbdf853d-55c8-4780-ad03-35441e5ffc10"` (the "AI summaries" folder, established convention)
+          - `visibility = "public"` (the `upload_report` enum is `public | shared_with_link | private` — no `shared_in_groupon` value here; `public` is the closest equivalent for org-wide discoverability)
+          - `overwrite_option = "overwrite"` (versions any existing same-title report instead of creating a sibling — the server handles the dedup, so we don't need a separate `list_reports` call)
+          - `description` = the one-line scoreboard summary (alternate_names + composed verdicts) from `summary.md`
+       3. Return just the final report URL to the orchestrator. Stay under 100 words.
+    3. Receive the URL from the subagent and print it to the user. If the subagent reports failure — log the reason but don't fail the run; `combined_report.html` and `summary.md` already exist locally.
 
-       ```bash
-       python -c "import base64,sys; sys.stdout.write(base64.b64encode(open(r'<run_dir>\\combined_report.html','rb').read()).decode())"
-       ```
+    Why a subagent and not the main session: emitting a base64 of `combined_report.html` (currently ~350 KB → ~470 KB base64, ~120 K tokens) directly from the main orchestrator session would consume most of its remaining output budget. The subagent has a fresh, dedicated context — the base64 cost stays isolated there, and the main session only sees the short URL coming back. This is the same pattern as the `run-ab-evaluation` / `run-seo-evaluation` subagents.
 
-       Pipe the output into a temporary file the next step can read, OR capture it as a shell variable. Do NOT inline the base64 inside the SKILL.md — it's per-run data.
-    3. Call `mcp__groupon-iq__upload_report` with:
-       - `title = "Experiment Evaluation Combined Report — <YYYY-MM-DD>"`
-       - `html_file_base64 = <base64 from step 2>`
-       - `folder_id = "dbdf853d-55c8-4780-ad03-35441e5ffc10"` (the "AI summaries" folder, established convention)
-       - `visibility = "public"` (visible to all Groupon IQ users; the `upload_report` tool's enum is `shared_with_link | public | private` — there is NO `shared_in_groupon` value here, even though `create_report` has it; "public" is the closest equivalent to the old shared_in_groupon for org-wide discoverability)
-       - `overwrite_option = "overwrite"` (versions any existing same-title report instead of creating a sibling — replaces the previous `list_reports → branch → POST /versions` two-step)
-       - `description` = one-line summary of the queue (alternate_names + composed verdicts from `summary.md`)
-    4. The tool returns the report URL. If the call fails (network, auth, or upstream error) — log it and continue; **do not fail the run on publish errors**.
+    Why MCP and not a Python helper that POSTs directly to the IQ REST API: the IQ REST API and the MCP transport share the same host (`api.enc.groupon.com`), but only the MCP route survives in the claude.ai routine sandbox — direct network calls from the sandbox to `api.enc.groupon.com` are blocked by network policy. The MCP tool call is routed through Anthropic's harness, which is what makes it work there. The MCP HTTP transport is also how Claude Code locally reaches the IQ MCP, so the same code path serves both environments.
 
-    Why MCP not curl: this skill must run unattended in claude.ai routines, whose sandbox blocks `api.enc.groupon.com` for curl but allows the configured MCP server to reach it. `html_file_path` is NOT supported because the groupon-iq MCP runs as an HTTP server on Groupon infrastructure (`type: "http"`, `url: api.enc.groupon.com/groupon-iq-mcp/mcp`) — it has no view of the orchestrator's local filesystem regardless of slash direction. `html_file_base64` is the only file-aware mode that works for a remote MCP transport. The token cost (~120K tokens per upload at 350 KB HTML) is the explicit tradeoff for cross-environment portability.
+    Practical ceiling — explicit tradeoff: this design fits HTML up to roughly 600–700 KB raw (where the subagent's own context budget caps out emitting base64), and ~3.75 MB if we accept losing the subagent isolation (the MCP tool's `html_file_base64` cap is 5 MB of base64 = ~3.75 MB raw). Current reports run ~350 KB. If they grow past ~3 MB we need a different mechanism — likely a `html_file_url` mode on the IQ MCP that fetches the file from a temporary URL, since no LLM-mediated path scales past the 5 MB MCP cap.
 12. **Print final paths** to user: combined_report.html, summary.md, passthrough/, and the Groupon IQ URL (if publish succeeded).
 
 ## Tool contract
