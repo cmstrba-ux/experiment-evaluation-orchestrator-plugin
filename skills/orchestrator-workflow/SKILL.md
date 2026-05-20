@@ -27,11 +27,26 @@ description: Top-level workflow for evaluating a queue of experiments. Reads tes
    - **Model rule**: never downgrade to Sonnet inside this orchestrator. All three subagents need consistent reasoning depth (verdict synthesis, SRM remediation, narrative interpretation); cost is the explicit tradeoff for run-to-run consistency.
 9. **Verify outputs.** Each expected JSON exists; if a subagent failed, the JSON contains `{"status":"failed","reason":...}` rather than missing. Log failures, continue.
 10. **render-combined-report** on `<run_dir>` with `--run-id` and `--data-through`.
-11. **Publish to Groupon IQ** (single canonical link per run-date; reruns on the same day version that one report instead of spawning siblings). Title format: `Experiment Evaluation Combined Report — YYYY-MM-DD` (em-dash `—`, not hyphen) where the date is the **YYYY-MM-DD prefix of run_id** (the day the orchestrator ran). NOT data_through (data freshness drifts on reruns even when the analyst's intent is the same publication), NOT the experiment names — the canonical link is "today's combined evaluation run", and versioning is the dedup mechanism. Steps:
+11. **Publish to Groupon IQ via the `mcp__groupon-iq__upload_report` MCP tool** (single canonical link per run-date; reruns on the same day version that one report instead of spawning siblings). Title format: `Experiment Evaluation Combined Report — YYYY-MM-DD` (em-dash `—`, not hyphen) where the date is the **YYYY-MM-DD prefix of run_id** (the day the orchestrator ran). NOT data_through (data freshness drifts on reruns even when the analyst's intent is the same publication), NOT the experiment names — the canonical link is "today's combined evaluation run", and versioning is the dedup mechanism. Steps:
+
     1. Compute the date string from `run_id` (first 10 chars, YYYY-MM-DD).
-    2. Search existing IQ reports for the exact title via `mcp__groupon-iq__list_reports` with `search="Experiment Evaluation Combined Report — <YYYY-MM-DD>"`. If a matching report exists, POST the new HTML as a new version via curl: `curl -X POST "https://api.enc.groupon.com/reports/reports/<id>/versions" -H "g-api-key: $IQ_API_KEY" -F "file=@<combined_report.html>;type=text/html"`.
-    3. If no match exists, call `mcp__groupon-iq__create_report` with that exact title, `folder_id="dbdf853d-55c8-4780-ad03-35441e5ffc10"` ("AI summaries" folder, established convention), `visibility="shared_in_groupon"`, and a one-line description summarizing the queue (alternate_names + verdicts). Then POST the HTML to the returned `/versions` URL.
-    4. Skip publish silently when `$IQ_API_KEY` is unset OR `--no-publish` is on the invocation. Don't fail the run on publish errors; log them and continue.
+    2. Base64-encode `<run_dir>/combined_report.html` (a ~350 KB HTML produces a ~470 KB base64 string, well under the MCP tool's 5 MB cap):
+
+       ```bash
+       python -c "import base64,sys; sys.stdout.write(base64.b64encode(open(r'<run_dir>\\combined_report.html','rb').read()).decode())"
+       ```
+
+       Pipe the output into a temporary file the next step can read, OR capture it as a shell variable. Do NOT inline the base64 inside the SKILL.md — it's per-run data.
+    3. Call `mcp__groupon-iq__upload_report` with:
+       - `title = "Experiment Evaluation Combined Report — <YYYY-MM-DD>"`
+       - `html_file_base64 = <base64 from step 2>`
+       - `folder_id = "dbdf853d-55c8-4780-ad03-35441e5ffc10"` (the "AI summaries" folder, established convention)
+       - `visibility = "public"` (visible to all Groupon IQ users; the `upload_report` tool's enum is `shared_with_link | public | private` — there is NO `shared_in_groupon` value here, even though `create_report` has it; "public" is the closest equivalent to the old shared_in_groupon for org-wide discoverability)
+       - `overwrite_option = "overwrite"` (versions any existing same-title report instead of creating a sibling — replaces the previous `list_reports → branch → POST /versions` two-step)
+       - `description` = one-line summary of the queue (alternate_names + composed verdicts from `summary.md`)
+    4. The tool returns the report URL. If the call fails (network, auth, or upstream error) — log it and continue; **do not fail the run on publish errors**.
+
+    Why MCP not curl: this skill must run unattended in claude.ai routines, whose sandbox blocks `api.enc.groupon.com` for curl but allows the configured MCP server to reach it. `html_file_path` is NOT supported because the groupon-iq MCP runs as an HTTP server on Groupon infrastructure (`type: "http"`, `url: api.enc.groupon.com/groupon-iq-mcp/mcp`) — it has no view of the orchestrator's local filesystem regardless of slash direction. `html_file_base64` is the only file-aware mode that works for a remote MCP transport. The token cost (~120K tokens per upload at 350 KB HTML) is the explicit tradeoff for cross-environment portability.
 12. **Print final paths** to user: combined_report.html, summary.md, passthrough/, and the Groupon IQ URL (if publish succeeded).
 
 ## Tool contract
