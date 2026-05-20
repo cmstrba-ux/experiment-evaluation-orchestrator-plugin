@@ -1,3 +1,29 @@
+0.8.4 — FAQ variant rename: swap control/treatment in addition to true/false mapping:
+  - scripts/lib/bq_queries.sql — extended all 9 FAQ variant-normalization CASE
+    blocks to handle inverted post-rename labels. The pre-rename true/false
+    mapping (true→control, false→treatment) is unchanged. New behavior: the
+    literal post-rename 'control' and 'treatment' rows are swapped because the
+    FAQ flag-layer assignment was set up inverted — what's labeled 'control'
+    in the source data is actually the treatment side. Applied identically in
+    ab_filtered_raw, ab_filtered_remediated, ab_overall_raw,
+    ab_overall_remediated, category_daily, category_daily_by_l2,
+    overall_per_cat_daily, deal_top_winners_losers (per_deal CTE),
+    deal_by_category.
+  - IN list extended with 2 new entries from test_definitions:
+    `xp-mbnxt-29568-web-faq-section` (older FAQ experiment), and the alternate
+    name `FAQ reviews - 8k - before change`. Now matches all 3 active FAQ
+    alternate_names plus both GrowthBook experiment ids.
+  - Restructured each CASE from 2 flat WHEN clauses to a nested CASE so the
+    IN list lives in one place per query block (easier to extend; previously
+    duplicated 4× per block via AND-clauses).
+  - deal_top_winners_losers comment: callers still pass @ctrl_name='control'
+    for FAQ experiments. The new CASE produces 'control' for actual controls
+    and 'treatment' for actual treatments, so the existing convention holds.
+  - Downstream contract preserved: variantname output of every FAQ-touching
+    query now represents the actual semantic side (control = real control,
+    treatment = real treatment), with no half-applied state since the swap
+    is colocated with the existing true/false mapping.
+
 0.8.3 — Switch active workflow to self-hosted runner (uses Max OAuth, $0 tokens):
   - Cloud-runner + ANTHROPIC_API_KEY path moved to .github/disabled/ for
     rollback. The active workflow now targets [self-hosted, windows] and

@@ -21,19 +21,37 @@ ORDER BY start_date DESC;
 
 -- name: ab_filtered_raw
 -- description: AB-Filtered view from review_experiments_hist (precise OR per spec §4).
---   Variant normalization: `xp-mbnxt-32228-web-faq-reviews-section` was renamed mid-experiment
---   from true/false (original) to control/treatment (post-2026-05-14). The CASE below maps the
---   old names onto the new ones so the two halves aggregate as one experiment. The IN list
---   matches both the GrowthBook experiment id (used in `experiments_jupiter_hist`) and the
---   two `alternate_name` values used in `review_experiments_hist` / `review_experiments_deal`
---   ('FAQ reviews', 'FAQ reviews - 8k'). ELSE branch is a no-op for all other experiments.
---   See CHANGELOG 0.6.5.
+--   Variant normalization (FAQ family): the FAQ experiments
+--   (`xp-mbnxt-32228-web-faq-reviews-section` and older `xp-mbnxt-29568-web-faq-section`) were
+--   renamed mid-experiment from true/false (original) to control/treatment (post-2026-05-14).
+--   The nested CASE handles BOTH halves:
+--     (1) maps old true/false rows to control/treatment (true→control, false→treatment) —
+--         unchanged from the original mapping, which was semantically correct.
+--     (2) swaps the post-rename control/treatment rows because the flag-layer assignment is
+--         INVERTED for FAQ experiments — what's labeled 'control' in the source data is
+--         actually the treatment side, and vice versa.
+--   The IN list matches both GrowthBook experiment ids (used in `experiments_jupiter_hist`) and
+--   `alternate_name` values used in `review_experiments_hist` / `review_experiments_deal`
+--   ('FAQ reviews', 'FAQ reviews - 8k', 'FAQ reviews - 8k - before change'). ELSE branch is a
+--   no-op for all other experiments. See CHANGELOG 0.6.5 + 0.8.4.
 -- params: @alternate_name (STRING), @start_date (DATE), @end_date (DATE)
 SELECT
   event_date, experimentname,
   CASE
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
     ELSE variantname
   END AS variantname,
   country, region, clientPlatform, groupon_version,
@@ -60,8 +78,20 @@ GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9;
 SELECT
   event_date, experimentname,
   CASE
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
     ELSE variantname
   END AS variantname,
   country, region, clientPlatform, groupon_version,
@@ -90,8 +120,20 @@ SELECT
   event_date,
   experimentname,
   CASE
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
     ELSE variantname
   END AS variantname,
   country,
@@ -117,8 +159,20 @@ SELECT
   event_date,
   experimentname,
   CASE
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
     ELSE variantname
   END AS variantname,
   country,
@@ -241,8 +295,20 @@ WITH base AS (
   SELECT
     event_date, experimentname,
     CASE
-      WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-      WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+      WHEN experimentname IN (
+        'xp-mbnxt-32228-web-faq-reviews-section',
+        'xp-mbnxt-29568-web-faq-section',
+        'FAQ reviews',
+        'FAQ reviews - 8k',
+        'FAQ reviews - 8k - before change'
+      ) THEN
+        CASE variantname
+          WHEN 'false'     THEN 'treatment'
+          WHEN 'true'      THEN 'control'
+          WHEN 'control'   THEN 'treatment'
+          WHEN 'treatment' THEN 'control'
+          ELSE variantname
+        END
       ELSE variantname
     END AS variantname,
     SUM(uv) AS uv, SUM(udv) AS udv, SUM(ue_orders) AS ue_orders, SUM(margin_1_vfm) AS margin_1_vfm
@@ -287,8 +353,20 @@ SELECT
   event_date,
   web_category_level_2 AS category,
   CASE
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
     ELSE variantname
   END AS variantname,
   SUM(udv) AS udv,
@@ -316,8 +394,20 @@ SELECT
   exps.cat AS category,
   h.event_date,
   CASE
-    WHEN h.experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND h.variantname = 'false' THEN 'treatment'
-    WHEN h.experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND h.variantname = 'true'  THEN 'control'
+    WHEN h.experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE h.variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE h.variantname
+      END
     ELSE h.variantname
   END AS variantname,
   SUM(h.distinct_bcookie_count) AS bcookies,
@@ -344,8 +434,20 @@ WITH per_deal AS (
   SELECT
     deal_uuid, deal_url, deal_category,
     CASE
-      WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-      WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+      WHEN experimentname IN (
+        'xp-mbnxt-32228-web-faq-reviews-section',
+        'xp-mbnxt-29568-web-faq-section',
+        'FAQ reviews',
+        'FAQ reviews - 8k',
+        'FAQ reviews - 8k - before change'
+      ) THEN
+        CASE variantname
+          WHEN 'false'     THEN 'treatment'
+          WHEN 'true'      THEN 'control'
+          WHEN 'control'   THEN 'treatment'
+          WHEN 'treatment' THEN 'control'
+          ELSE variantname
+        END
       ELSE variantname
     END AS variantname,
     SUM(margin_1_vfm) AS m1
@@ -378,8 +480,20 @@ LIMIT 20;
 SELECT
   web_category_level_2 AS category,
   CASE
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'false' THEN 'treatment'
-    WHEN experimentname IN ('xp-mbnxt-32228-web-faq-reviews-section', 'FAQ reviews', 'FAQ reviews - 8k') AND variantname = 'true'  THEN 'control'
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
     ELSE variantname
   END AS variantname,
   SUM(udv) AS udv,
