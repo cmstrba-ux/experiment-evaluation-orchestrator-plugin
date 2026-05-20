@@ -916,7 +916,18 @@ def load_run(run_dir: Path):
     # countdown ("X/14 days needed") and flag results as PRELIMINARY when the
     # SEO release is still inside the 14-day pre-eligibility window. The queue
     # field is the single source of truth; subagent JSONs don't carry it.
+    #
+    # Canonical location is `<run_dir>/queue.json`. We also probe `<run_dir>/raw/queue.json`
+    # as a fallback because orchestrator-workflow Step 5 left the path unspecified and the
+    # list-experiments skill emits to stdout — earlier runs piped it to raw/ alongside the
+    # other artifacts, which silently broke SEO TOO EARLY detection on 2026-05-20. The
+    # fallback keeps reruns of those run directories working; new runs should write to the
+    # top-level path.
     queue_path = run_dir / "queue.json"
+    if not queue_path.is_file():
+        alt_queue_path = run_dir / "raw" / "queue.json"
+        if alt_queue_path.is_file():
+            queue_path = alt_queue_path
     if queue_path.is_file():
         try:
             queue = json.loads(queue_path.read_text(encoding="utf-8"))

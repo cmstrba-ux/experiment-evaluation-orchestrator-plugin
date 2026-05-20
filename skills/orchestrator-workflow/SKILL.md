@@ -15,7 +15,7 @@ description: Top-level workflow for evaluating a queue of experiments. Reads tes
 2. **Generate run_id** = current local time as `YYYY-MM-DD-HH-MM`. `run_dir` = `<out_root>/<run_id>`. Create `raw/` and `passthrough/` subdirs.
 3. **Mode = rerender:** call render-combined-report directly on the existing `<run-id>` dir. Skip steps 4-9.
 4. **Verify dependencies installed.** Check that both `ab-experiments` and `seo-impact-plugin` are loaded by querying the plugin manifest. If missing, fail with install instructions.
-5. **list-experiments.** Build queue. If empty → exit with message.
+5. **list-experiments.** Build queue and **write it to `<run_dir>/queue.json`** (top level, NOT inside `raw/`). The renderer reads this exact path to merge `evaluate_seo_since` onto each experiment for the SEO TOO EARLY countdown — placing it under `raw/` silently breaks that feature (the merge no-ops and SEO tiles render `n/a` instead of `TOO EARLY — X/14 days`). If empty → exit with message.
 6. **resolve-deal-urls** for every queue entry where `test_deals` has matching rows. Cache results in `<run_dir>/raw/urls_<alt_name>.json`.
 7. *(Removed.)* Synthetic-control fallback inside `seo-impact-plugin:seo-impact-analyzer` (hierarchical L3→L2→L1→page_type→domain) replaces the orchestrator's previous control URL sampling.
 8. **Dispatch parallel subagents** (Task tool, **model=opus** for every subagent, single message containing multiple tool calls):
