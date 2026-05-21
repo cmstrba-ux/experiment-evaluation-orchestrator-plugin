@@ -190,6 +190,100 @@ WHERE experimentname = @experiment_name
   AND active_visitor_flag = 'Y'
 GROUP BY 1, 2, 3, 4, 5, 6;
 
+-- name: discover_sub_experiments
+-- description: Probe experiments_jupiter_hist for sub-experiment names matching a LIKE pattern in
+--   the test window. Used by run-ab-evaluation when `use_deal_category_split=TRUE` and the parent
+--   `experiment_name` (from test_definitions) returns 0 rows — e.g. "AI Summaries" is split into
+--   per-category sub-experiments like 'xp-mbnxt-31196-ai-review-summary-hbw', '...-ttd', etc.
+--   The pattern is supplied by the caller; the run-ab-evaluation skill maintains the
+--   parent → pattern map.
+-- params: @pattern (STRING), @start_date (DATE), @end_date (DATE)
+SELECT DISTINCT experimentname
+FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiments_jupiter_hist`
+WHERE event_date BETWEEN @start_date AND @end_date
+  AND LOWER(experimentname) LIKE LOWER(@pattern)
+ORDER BY experimentname;
+
+-- name: ab_overall_raw_multi
+-- description: AB-Overall view across MULTIPLE sub-experiments (population-wide). Same shape as
+--   `ab_overall_raw` but filters via `experimentname IN UNNEST(@experiment_names)` so the
+--   orchestrator can sum across category-split sub-experiments (e.g. AI Summaries → 8 ai-review-
+--   summary-<cat> rows). Variant rename CASE preserved.
+-- params: @experiment_names (ARRAY<STRING>), @start_date (DATE), @end_date (DATE)
+SELECT
+  event_date,
+  experimentname,
+  CASE
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
+    ELSE variantname
+  END AS variantname,
+  country,
+  clientPlatform,
+  log_status,
+  search_visitor_flag,
+  SUM(UV) AS uv,
+  SUM(UDV) AS udv,
+  SUM(ue_orders) AS ue_orders,
+  SUM(margin_1_vfm) AS margin_1_vfm,
+  SUM(gross_bookings) AS gross_bookings,
+  SUM(distinct_bcookie_count) AS distinct_bcookie_count
+FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiments_jupiter_hist`
+WHERE experimentname IN UNNEST(@experiment_names)
+  AND event_date BETWEEN @start_date AND @end_date
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
+
+-- name: ab_overall_remediated_multi
+-- description: AB-Overall SRM remediation across MULTIPLE sub-experiments. Same as
+--   `ab_overall_remediated` but filters via `experimentname IN UNNEST(@experiment_names)`.
+-- params: @experiment_names (ARRAY<STRING>), @start_date (DATE), @end_date (DATE)
+SELECT
+  event_date,
+  experimentname,
+  CASE
+    WHEN experimentname IN (
+      'xp-mbnxt-32228-web-faq-reviews-section',
+      'xp-mbnxt-29568-web-faq-section',
+      'FAQ reviews',
+      'FAQ reviews - 8k',
+      'FAQ reviews - 8k - before change'
+    ) THEN
+      CASE variantname
+        WHEN 'false'     THEN 'treatment'
+        WHEN 'true'      THEN 'control'
+        WHEN 'control'   THEN 'treatment'
+        WHEN 'treatment' THEN 'control'
+        ELSE variantname
+      END
+    ELSE variantname
+  END AS variantname,
+  country,
+  clientPlatform,
+  log_status,
+  SUM(UV) AS uv,
+  SUM(UDV) AS udv,
+  SUM(ue_orders) AS ue_orders,
+  SUM(margin_1_vfm) AS margin_1_vfm,
+  SUM(gross_bookings) AS gross_bookings,
+  SUM(distinct_bcookie_count) AS distinct_bcookie_count
+FROM `kbc-grpn-40-0cd2.out_c_10_bcookie_with_experiment_from_jupiter.experiments_jupiter_hist`
+WHERE experimentname IN UNNEST(@experiment_names)
+  AND event_date BETWEEN @start_date AND @end_date
+  AND active_visitor_flag = 'Y'
+GROUP BY 1, 2, 3, 4, 5, 6;
+
 -- name: resolve_deal_urls
 -- description: Resolve test_deals → deal_url + metadata. Replaces MDS/Okta enrichment.
 -- params: @alternate_name (STRING)

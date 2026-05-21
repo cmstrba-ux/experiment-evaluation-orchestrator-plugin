@@ -1,3 +1,47 @@
+0.8.8 — Local IQ publish via curl + AB-Overall fan-out for category-split parents:
+  - skills/orchestrator-workflow/SKILL.md Step 11 — replaced the MCP-subagent
+    publish path (v0.8.6/0.8.7) with a direct `bash ${CLAUDE_PLUGIN_ROOT}/.github/scripts/publish-to-iq.sh`
+    invocation from the orchestrator's main session. The MCP-subagent path was
+    a sandbox workaround for the claude.ai routine network policy; now that
+    api.enc.groupon.com is allowlisted in the local environment, the same curl
+    script that the self-hosted runner already uses works end-to-end for local
+    runs too. Eliminates the ~100k-token cost of spinning up a fresh subagent
+    just to base64-encode a small file and call one MCP tool. Local and CI now
+    share one publish path. Failure modes: missing IQ_API_KEY → skip+warn,
+    network/script error → log+continue, 50 MB IQ cap still applies.
+  - scripts/lib/bq_queries.sql — three new queries to fix AB-Overall for
+    `use_deal_category_split=TRUE` parent experiments:
+      * `discover_sub_experiments` — probes experiments_jupiter_hist for
+        DISTINCT experimentname matching a LIKE pattern within the test
+        window. The pattern is supplied by the caller (run-ab-evaluation
+        maintains the parent → pattern map).
+      * `ab_overall_raw_multi` — same shape as ab_overall_raw but filters via
+        `experimentname IN UNNEST(@experiment_names)` so the orchestrator can
+        sum across category-split sub-experiments (e.g. AI Summaries → 8
+        ai-review-summary-<cat> rows).
+      * `ab_overall_remediated_multi` — multi version of the remediated query
+        for SRM fallback when fan-out was used.
+    Variant rename CASE preserved in both new aggregating queries.
+  - skills/run-ab-evaluation/SKILL.md — new "Sub-experiment discovery" section
+    documenting the parent → pattern map (seed: `AI Summaries` →
+    `%-ai-review-summary-%`). Step 1 rewritten as a two-pass: probe the parent
+    name first, fan out via discover→multi when probe returns 0 rows AND
+    `use_deal_category_split=TRUE`. Step 5 (SRM remediation) routes to the
+    matching `_multi` query when step 1 used fan-out. Step 6a (PerCategory
+    Overall) now reuses the cached `discovered_sub_experiments` list instead
+    of re-probing. When the parent is unknown AND the probe returns 0 rows,
+    emit `raw.overall = {"status":"no_data","reason":"unknown_parent_pattern"}`
+    so the renderer surfaces the gap explicitly (rather than silently showing
+    zero traffic). Closes the 2026-05-12 AI Summaries v4 regression that
+    recurred on 2026-05-21.
+  - skills/run-deal-charts/SKILL.md — added explicit `bq` CLI array-param
+    syntax block for the title-enrichment query
+    (`--parameter='uuids:ARRAY<STRING>:[...]'`). Multiple subagent runs have
+    silently emitted 0 rows from the wrong type-specifier syntax; with the
+    correct invocation block in the skill, top winners/losers now reliably
+    enrich with company_name + deal_title instead of falling back to URL
+    slugs. Best-effort behavior preserved (renderer fallback unchanged).
+
 0.8.4 — FAQ variant rename: swap control/treatment in addition to true/false mapping:
   - scripts/lib/bq_queries.sql — extended all 9 FAQ variant-normalization CASE
     blocks to handle inverted post-rename labels. The pre-rename true/false

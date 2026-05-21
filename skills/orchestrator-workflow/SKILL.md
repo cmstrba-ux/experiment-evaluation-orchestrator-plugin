@@ -27,26 +27,26 @@ description: Top-level workflow for evaluating a queue of experiments. Reads tes
    - **Model rule**: never downgrade to Sonnet inside this orchestrator. All three subagents need consistent reasoning depth (verdict synthesis, SRM remediation, narrative interpretation); cost is the explicit tradeoff for run-to-run consistency.
 9. **Verify outputs.** Each expected JSON exists; if a subagent failed, the JSON contains `{"status":"failed","reason":...}` rather than missing. Log failures, continue.
 10. **render-combined-report** on `<run_dir>` with `--run-id` and `--data-through`.
-11. **Publish to Groupon IQ via a dedicated upload subagent** (single canonical link per run-date; reruns on the same day version that one report instead of spawning siblings). Title format: `Experiment Evaluation Combined Report — YYYY-MM-DD` (em-dash `—`, not hyphen) where the date is the **YYYY-MM-DD prefix of run_id** (the day the orchestrator ran). NOT data_through (data freshness drifts on reruns even when the analyst's intent is the same publication), NOT the experiment names — the canonical link is "today's combined evaluation run", and versioning is the dedup mechanism. Steps:
+11. **Publish to Groupon IQ via HTTP (curl)** — runs `bash ${CLAUDE_PLUGIN_ROOT}/.github/scripts/publish-to-iq.sh` directly from the orchestrator. Single canonical link per run-date; reruns on the same day version the same report instead of spawning siblings. Title format: `Experiment Evaluation Combined Report — YYYY-MM-DD` (em-dash `—`, not hyphen) where the date is the **YYYY-MM-DD prefix of run_id** (the day the orchestrator ran). NOT data_through (data freshness drifts on reruns even when the analyst's intent is the same publication), NOT the experiment names — the canonical link is "today's combined evaluation run", and versioning is the dedup mechanism. Steps:
 
-    1. Compute the date string from `run_id` (first 10 chars, YYYY-MM-DD). Title = `"Experiment Evaluation Combined Report — <YYYY-MM-DD>"`.
-    2. Dispatch a single subagent (Task tool, `subagent_type=general-purpose`, `model=opus`) with a self-contained prompt instructing it to:
-       1. Read `<run_dir>/combined_report.html` from disk and base64-encode it.
-       2. Call `mcp__groupon-iq__upload_report` with:
-          - `title = "Experiment Evaluation Combined Report — <YYYY-MM-DD>"`
-          - `html_file_base64 = <the base64 string from step 1>`
-          - `folder_id = "dbdf853d-55c8-4780-ad03-35441e5ffc10"` (the "AI summaries" folder, established convention)
-          - `visibility = "public"` (the `upload_report` enum is `public | shared_with_link | private` — no `shared_in_groupon` value here; `public` is the closest equivalent for org-wide discoverability)
-          - `overwrite_option = "overwrite"` (versions any existing same-title report instead of creating a sibling — the server handles the dedup, so we don't need a separate `list_reports` call)
-          - `description` = the one-line scoreboard summary (alternate_names + composed verdicts) from `summary.md`
-       3. Return just the final report URL to the orchestrator. Stay under 100 words.
-    3. Receive the URL from the subagent and print it to the user. If the subagent reports failure — log the reason but don't fail the run; `combined_report.html` and `summary.md` already exist locally.
+    1. Verify `IQ_API_KEY` is set in the environment (sourced from `~/.claude/settings.json:env`). If missing, log a warning + skip publish — `combined_report.html` and `summary.md` already exist locally.
+    2. Invoke `RUN_DIR=<run_dir> IQ_API_KEY=$IQ_API_KEY bash ${CLAUDE_PLUGIN_ROOT}/.github/scripts/publish-to-iq.sh` via the Bash tool. The script:
+       - Derives the YYYY-MM-DD prefix from `RUN_DIR`'s basename.
+       - POSTs `/reports/list` (search) to find an existing report by exact title.
+       - If found → POSTs `/reports/reports/<id>/versions` with the HTML multipart body.
+       - If not → POSTs `/reports/reports` to create (folder `dbdf853d-55c8-4780-ad03-35441e5ffc10` = "AI summaries", `visibility: shared_in_groupon`, generic description), then versions v1.
+       - Echoes `title`, `report` id, `version`, and the final `url` to stdout.
+    3. Parse the `url:` line out of stdout and print to the user alongside the local paths. If the script exits non-zero, surface stderr but do NOT fail the run.
 
-    Why a subagent and not the main session: emitting a base64 of `combined_report.html` (currently ~350 KB → ~470 KB base64, ~120 K tokens) directly from the main orchestrator session would consume most of its remaining output budget. The subagent has a fresh, dedicated context — the base64 cost stays isolated there, and the main session only sees the short URL coming back. This is the same pattern as the `run-ab-evaluation` / `run-seo-evaluation` subagents.
+    **Why curl-direct and not the MCP subagent path** (v0.8.6/0.8.7 design): `api.enc.groupon.com` is now allowlisted in the local environment, so direct HTTPS works. The subagent path cost a fresh 100k-token context just to base64-encode a small file and call one MCP tool; the curl script does the same work in <1s of shell with zero LLM tokens. The MCP-subagent path was a sandbox workaround for the claude.ai routine network policy — see `feedback_claude_ai_routine_network_constraints.md`. The self-hosted runner (`.github/workflows/evaluate.yml`) already uses this same script unchanged, so local + CI now share one publish path.
 
-    Why MCP and not a Python helper that POSTs directly to the IQ REST API: the IQ REST API and the MCP transport share the same host (`api.enc.groupon.com`), but only the MCP route survives in the claude.ai routine sandbox — direct network calls from the sandbox to `api.enc.groupon.com` are blocked by network policy. The MCP tool call is routed through Anthropic's harness, which is what makes it work there. The MCP HTTP transport is also how Claude Code locally reaches the IQ MCP, so the same code path serves both environments.
+    **Failure modes**:
+    - `IQ_API_KEY` missing → skip publish, log warning. Don't fail the run.
+    - Network/DNS failure → script exits non-zero with stderr, orchestrator logs but continues.
+    - Title collision with a report the API key can't write → log the response and continue.
+    - HTML file size > 50 MB → server returns 413; the script surfaces the error. Renderer should keep the gzip+strip path that keeps current reports ~350 KB.
 
-    Practical ceiling — explicit tradeoff: this design fits HTML up to roughly 600–700 KB raw (where the subagent's own context budget caps out emitting base64), and ~3.75 MB if we accept losing the subagent isolation (the MCP tool's `html_file_base64` cap is 5 MB of base64 = ~3.75 MB raw). Current reports run ~350 KB. If they grow past ~3 MB we need a different mechanism — likely a `html_file_url` mode on the IQ MCP that fetches the file from a temporary URL, since no LLM-mediated path scales past the 5 MB MCP cap.
+    **Practical ceiling**: 50 MB raw per the IQ server's hard cap. The MCP route had a tighter 5 MB / ~3.75 MB raw cap on `html_file_base64`; switching to multipart curl lifts that. Current reports run ~350 KB, so this is a non-issue today, but the headroom matters as the upstream SEO HTML payload grows.
 12. **Print final paths** to user: combined_report.html, summary.md, passthrough/, and the Groupon IQ URL (if publish succeeded).
 
 ## Tool contract

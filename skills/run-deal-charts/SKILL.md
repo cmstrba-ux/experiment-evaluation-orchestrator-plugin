@@ -27,7 +27,27 @@ Match `run-ab-evaluation/SKILL.md`:
 1. **Resolve ctrl_name.** If not provided, run `SELECT DISTINCT variantname FROM out_c_10_review_ab_experiments.review_experiments_hist WHERE event_date BETWEEN @start_date AND @end_date AND (experimentname = @alternate_name OR ...)` and apply the convention table above.
 2. Run `bq_queries.deal_top_winners_losers` with `@ctrl_name=<resolved>` → split into `top_winners` (m1_delta DESC, top 10) and `top_losers` (m1_delta ASC, top 10).
 3. Run `bq_queries.deal_by_category` → pivot rows where `variantname = ctrl_name` into `*_ctrl` and the other variant into `*_treat`. Compute per-category deltas (cvr_treat - cvr_ctrl, m1_treat - m1_ctrl).
-4. **Enrich titles.** Collect the union of UUIDs across `top_winners` + `top_losers`. Run a single lookup against `kbc-grpn-40-0cd2.in_c_shr_dimension_datamart.deal_option` selecting `MAX(company_name)` and `MAX(deal_creative_content_title)` per `deal_uuid`. Merge results back into the rows so each contains `company_name` and `deal_title`.
+4. **Enrich titles.** Collect the union of UUIDs across `top_winners` + `top_losers` (≤20 UUIDs total since each list is capped at 10). Run a single lookup against `kbc-grpn-40-0cd2.in_c_shr_dimension_datamart.deal_option`:
+
+   ```sql
+   SELECT
+     LOWER(TRIM(deal_uuid)) AS deal_uuid,
+     MAX(company_name) AS company_name,
+     MAX(deal_creative_content_title) AS deal_title
+   FROM `kbc-grpn-40-0cd2.in_c_shr_dimension_datamart.deal_option`
+   WHERE LOWER(TRIM(deal_uuid)) IN UNNEST(@uuids)
+   GROUP BY 1
+   ```
+
+   **`bq` CLI array-param syntax** (avoid this trap — it has bitten the subagent multiple times):
+   ```bash
+   bq query --use_legacy_sql=false --format=prettyjson \
+     --parameter='uuids:ARRAY<STRING>:["abc-123","def-456"]' \
+     "$SQL"
+   ```
+   The type specifier MUST be `ARRAY<STRING>` (uppercase, with angle brackets), and the value MUST be a JSON-quoted array literal — NOT a comma-separated string, NOT `ARRAY STRING`, NOT a Python list repr. If the subagent emits the wrong syntax bq silently returns 0 rows, the renderer falls back to URL slugs, and the rows look unenriched. Validate by counting returned rows = len(input UUIDs) before merging back.
+
+   Merge results back into the rows so each contains `company_name` and `deal_title`.
 4. Write JSON:
 
 ```json
