@@ -1,3 +1,24 @@
+0.9.0 — Deterministic data_through + run-date in-flight label (removes the v0.8.9 enabler):
+  - scripts/lib/render.py — `data_through` is now COMPUTED from the raw daily arrays
+    (`_max_event_date` + `_iter_daily_dates`, scanning every `daily` array under any
+    experiment regardless of event_date/date/d key), not taken from the agent-passed
+    `--data-through`. The orchestrating model resolved that loose "max event_date"
+    instruction inconsistently run-to-run (one run passed ~yesterday → 7/14, another the
+    locked window end → 1/14), which is what masked the v0.8.9 countdown bug. The report's
+    "data through" stamp is now a pure function of the data; `--data-through` degrades to a
+    fallback used only for degenerate runs with no daily rows. Both render() and
+    render_summary() apply it.
+  - scripts/lib/render.py:_compute_label — the in-flight check (`end_date >= X → PRELIMINARY`)
+    now compares against the RUN DATE (`_run_date(run_id)`), not `data_through`. With
+    data_through now equal to the locked window end, comparing against it would mis-flag the
+    latest closed experiment as still-running. Same wall-clock-anchor principle as the v0.8.9
+    SEO fix. Verified: a closed experiment (end_date 2026-05-13) rendered with run_id
+    2026-05-22 now labels FINAL — could extend, not PRELIMINARY.
+  - scripts/lib/test_render_helpers.py — 4 new tests: max_event_date across nested/mixed-key
+    daily arrays, none-when-empty, malformed-date skip, run-date prefix parsing.
+  - Net effect with v0.8.9: both the SEO countdown and the in-flight label are anchored on
+    the run date; data_through is deterministic. Idempotency test still byte-identical.
+
 0.8.9 — Fix frozen SEO TOO EARLY countdown (1/14 forever):
   - scripts/lib/render.py — the "X/14 days to preliminary SEO results" countdown was
     computed as `data_through - evaluate_seo_since`. But `data_through` is the max

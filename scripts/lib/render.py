@@ -1304,6 +1304,59 @@ def _seo_days_since_release(run_id, eval_seo_since, fallback_through=None):
     return max(0, (as_of - d_release).days)
 
 
+def _run_date(run_id):
+    """The calendar date the run happened, from the `YYYY-MM-DD` prefix of run_id.
+    Returns an ISO date string or None (e.g. the idempotency fixture passes "run")."""
+    from datetime import date as _D
+    if not run_id or len(str(run_id)) < 10:
+        return None
+    try:
+        return _D.fromisoformat(str(run_id)[:10]).isoformat()
+    except (ValueError, TypeError):
+        return None
+
+
+def _iter_daily_dates(obj):
+    """Yield the date string of every row in every `daily` array found anywhere in obj.
+    Rows carry the date under `event_date`, `date`, or `d` depending on subagent shape."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "daily" and isinstance(v, list):
+                for row in v:
+                    if isinstance(row, dict):
+                        dt = row.get("event_date") or row.get("date") or row.get("d")
+                        if dt:
+                            yield str(dt)
+            else:
+                yield from _iter_daily_dates(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _iter_daily_dates(item)
+
+
+def _max_event_date(experiments_raw):
+    """Deterministically derive data_through = max event_date across all raw daily arrays.
+
+    Replaces the agent-passed `--data-through`, which the orchestrating model resolved
+    inconsistently from a loose "max event_date" instruction (one run passed ~yesterday,
+    another the locked window end — see CHANGELOG v0.8.9/v0.9.0). Computing it from the
+    raw JSONs makes the report's "data through" stamp a pure function of the data.
+    Returns an ISO date string, or None when no daily rows exist (degenerate run).
+    """
+    from datetime import date as _D
+    best = None
+    for exp in experiments_raw.values():
+        for ds in _iter_daily_dates(exp):
+            s = str(ds)[:10]
+            try:
+                _D.fromisoformat(s)
+            except (ValueError, TypeError):
+                continue
+            if best is None or s > best:
+                best = s
+    return best
+
+
 def build_payload(name, exp, run_id, data_through):
     ab = exp.get("ab") or {}
     seo = exp.get("seo") or {}
@@ -1368,7 +1421,7 @@ def build_payload(name, exp, run_id, data_through):
     runway_overall = _compute_runway(o_stats, o_n)
     computed_label = _compute_label(
         end_date=ab.get("end_date"),
-        data_through=data_through,
+        as_of=_run_date(run_id) or data_through,  # run date = wall-clock anchor for in-flight; data_through is fallback
         n_days=f_n or o_n,
         verdict=(raw_filt.get("verdict") or raw_ovr.get("verdict")),
         runway=runway_filtered,
@@ -1767,6 +1820,10 @@ def render(run_dir: Path, out_path: Path, run_id: str = "run", data_through: str
     if not experiments_raw:
         out_path.write_text("<html><body><h1>No experiments to render.</h1></body></html>", encoding="utf-8")
         return
+    # data_through is computed deterministically from the raw daily arrays so the
+    # header "data through" stamp is a pure function of the data, not of whatever the
+    # orchestrating agent hand-passed. The CLI --data-through is a fallback only.
+    data_through = _max_event_date(experiments_raw) or data_through
     payloads = {name: build_payload(name, exp, run_id, data_through) for name, exp in experiments_raw.items()}
     payload_json = json.dumps({"run_id": run_id, "data_through": data_through, "experiments": payloads}, separators=(",", ":"), allow_nan=False)
     js = JS_PATH.read_text(encoding="utf-8") if JS_PATH.exists() else ""
@@ -1792,14 +1849,18 @@ def _runway_label(runway):
 EXTEND_RUNWAY_CAP_DAYS = 56
 
 
-def _compute_label(end_date, data_through, n_days, verdict, runway, primary_p=None):
+def _compute_label(end_date, as_of, n_days, verdict, runway, primary_p=None):
     """Authoritative label rule for the renderer.
 
     The subagent-emitted label is ignored — the renderer derives the label
     deterministically from significance + runway + duration. Label vocabulary:
 
-    - PRELIMINARY: experiment still in-flight (end_date >= data_through) or
-                   n_days < 7. The result is not stable yet.
+    - PRELIMINARY: experiment still in-flight (end_date >= as_of, where `as_of` is
+                   the run date) or n_days < 7. The result is not stable yet.
+                   NOTE: `as_of` is the run/calendar date, NOT data_through — the
+                   latter is the locked data-window end and would mis-flag the
+                   latest closed experiment as in-flight (same clock confusion the
+                   v0.8.9 SEO countdown fix addressed).
     - FINAL: experiment ended. This is the default — once an experiment has run
              past its end_date with enough days, it IS final. No "can be closed"
              qualifier (it's already final; nothing to "close").
@@ -1814,7 +1875,7 @@ def _compute_label(end_date, data_through, n_days, verdict, runway, primary_p=No
     case needs an explicit qualifier.
     """
     try:
-        if end_date and data_through and str(end_date) >= str(data_through):
+        if end_date and as_of and str(end_date) >= str(as_of):
             return "PRELIMINARY"
     except Exception:
         pass
@@ -1857,6 +1918,8 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
     ratio matches the ab-experiments dashboard convention.
     """
     experiments_raw = load_run(run_dir)
+    # Same deterministic data_through as render() — derived from the data, CLI is fallback.
+    data_through = _max_event_date(experiments_raw) or data_through
     lines = [f"# Experiment Evaluation — {run_id}", "", f"Data through **{data_through}**.", "", "## Scoreboard", ""]
     for name, exp in experiments_raw.items():
         ab = exp.get("ab") or {}

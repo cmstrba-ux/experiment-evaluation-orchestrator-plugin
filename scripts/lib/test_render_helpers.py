@@ -8,7 +8,43 @@ from render import (
     _seo_l2_row_lookup,
     _seo_l2_ctr_did_pp,
     _seo_days_since_release,
+    _max_event_date,
+    _run_date,
 )
+
+
+def test_max_event_date_scans_all_daily_arrays_and_shapes():
+    """data_through is the max date across every `daily` array, regardless of the
+    per-row date key (event_date / date / d) or how deeply nested it is."""
+    experiments = {
+        "A": {"ab": {"raw": {
+            "overall": {"daily": [{"event_date": "2026-05-10"}, {"event_date": "2026-05-13"}]},
+            "filtered": {"daily": [{"date": "2026-05-11"}]},
+        }}},
+        "B": {"ab": {"per_category": [
+            {"daily": [{"d": "2026-05-09"}, {"d": "2026-05-12"}]},
+        ]}},
+    }
+    assert _max_event_date(experiments) == "2026-05-13"
+
+
+def test_max_event_date_none_when_no_daily_rows():
+    assert _max_event_date({"A": {"ab": {"raw": {}}}}) is None
+    assert _max_event_date({}) is None
+
+
+def test_max_event_date_ignores_malformed_dates():
+    experiments = {"A": {"ab": {"raw": {"overall": {"daily": [
+        {"event_date": "not-a-date"}, {"event_date": "2026-05-07"}, {"event_date": ""},
+    ]}}}}}
+    assert _max_event_date(experiments) == "2026-05-07"
+
+
+def test_run_date_parses_prefix_and_handles_non_dates():
+    assert _run_date("2026-05-22-09-23") == "2026-05-22"
+    assert _run_date("run") is None
+    assert _run_date("") is None
+    assert _run_date(None) is None
 
 
 def test_seo_days_anchored_on_run_date_not_data_through():
