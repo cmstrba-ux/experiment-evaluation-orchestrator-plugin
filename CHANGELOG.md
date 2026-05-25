@@ -1,3 +1,22 @@
+0.8.9 — Fix frozen SEO TOO EARLY countdown (1/14 forever):
+  - scripts/lib/render.py — the "X/14 days to preliminary SEO results" countdown was
+    computed as `data_through - evaluate_seo_since`. But `data_through` is the max
+    event_date of the AB window, which is LOCKED to test_definitions `end_date`
+    (orchestrator-workflow Tool contract). For a closed experiment ending one day
+    after the SEO release, that difference is a constant — so the countdown showed
+    `1/14` on every rerun regardless of real elapsed calendar time, contradicting the
+    eligibility gate (`evaluate_seo_since <= today-14`) which correctly uses today.
+  - New module-level helper `_seo_days_since_release(run_id, eval_seo_since, fallback_through)`
+    anchors the countdown on the RUN date (the `YYYY-MM-DD` prefix of `run_id`) instead
+    of `data_through`. Deterministic on rerender of the same run (idempotency test still
+    byte-identical — it passes no run_id, so the helper falls back to data_through),
+    but advances with real time across runs. Both `build_payload` and `render_summary`
+    now call it; render_summary computes it unconditionally so the `<28d` maturity chip
+    works when SEO has actually run (was previously gated behind `status != "ok"`).
+  - scripts/lib/test_render_helpers.py — 3 regression tests: run-date anchoring (10/14
+    not 1/14 for the real 2026-05-22 inputs), monotonic advance across run dates,
+    fallback-to-data_through when run_id has no date prefix, negative-clamp, missing inputs.
+
 0.8.8 — Local IQ publish via curl + AB-Overall fan-out for category-split parents:
   - skills/orchestrator-workflow/SKILL.md Step 11 — replaced the MCP-subagent
     publish path (v0.8.6/0.8.7) with a direct `bash ${CLAUDE_PLUGIN_ROOT}/.github/scripts/publish-to-iq.sh`

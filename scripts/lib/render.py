@@ -1265,6 +1265,45 @@ def _compose_final_verdict(signals, mwse_pct=_DEFAULT_MWSE_PCT, ci_alpha=_DEFAUL
     }
 
 
+def _seo_days_since_release(run_id, eval_seo_since, fallback_through=None):
+    """Calendar days from the SEO release date to the run date.
+
+    The SEO maturation clock counts wall-clock days since `evaluate_seo_since`,
+    NOT days inside the AB data window. `data_through` is pinned to the experiment
+    `end_date` (the window is locked to test_definitions), so anchoring on it froze
+    the countdown at `end_date - release` — e.g. an experiment ending one day after
+    release showed 1/14 forever regardless of real elapsed time. We anchor on the
+    run date (the `YYYY-MM-DD` prefix of `run_id`) instead: deterministic on rerender
+    of the same run, and it advances with real time the way the orchestrator's
+    eligibility gate (`evaluate_seo_since <= today-14`) already does.
+
+    Falls back to `fallback_through` only when `run_id` has no parseable date prefix
+    (e.g. the default "run" used by the idempotency fixture). Returns None if neither
+    a run date nor the release date can be parsed.
+    """
+    from datetime import date as _D
+    if not eval_seo_since:
+        return None
+    try:
+        d_release = _D.fromisoformat(str(eval_seo_since))
+    except (ValueError, TypeError):
+        return None
+    as_of = None
+    if run_id and len(str(run_id)) >= 10:
+        try:
+            as_of = _D.fromisoformat(str(run_id)[:10])
+        except (ValueError, TypeError):
+            as_of = None
+    if as_of is None and fallback_through:
+        try:
+            as_of = _D.fromisoformat(str(fallback_through))
+        except (ValueError, TypeError):
+            as_of = None
+    if as_of is None:
+        return None
+    return max(0, (as_of - d_release).days)
+
+
 def build_payload(name, exp, run_id, data_through):
     ab = exp.get("ab") or {}
     seo = exp.get("seo") or {}
@@ -1378,21 +1417,18 @@ def build_payload(name, exp, run_id, data_through):
     # the same one used in skills/list-experiments/SKILL.md (`seo_eligible`).
     eval_seo_since = exp.get("evaluate_seo_since")
     seo_status = (seo or {}).get("status")
-    seo_days_elapsed = None
-    seo_too_early = False
     seo_days_needed_total = 14
-    if eval_seo_since and data_through:
-        try:
-            from datetime import date as _D
-            d_release = _D.fromisoformat(str(eval_seo_since))
-            d_through = _D.fromisoformat(str(data_through))
-            seo_days_elapsed = max(0, (d_through - d_release).days)
-            # Too early = SEO has not been dispatched AND the window hasn't matured.
-            # When seo_status is 'ok' we already have results; don't flag too-early.
-            if seo_status != "ok" and seo_days_elapsed < seo_days_needed_total:
-                seo_too_early = True
-        except (ValueError, TypeError):
-            pass
+    # Days are measured from release to the RUN date (run_id prefix), not data_through.
+    # See _seo_days_since_release — data_through is the AB window end and froze this at
+    # end_date - release for closed experiments (the 1/14-forever bug).
+    seo_days_elapsed = _seo_days_since_release(run_id, eval_seo_since, data_through)
+    # Too early = SEO has not been dispatched AND the window hasn't matured.
+    # When seo_status is 'ok' we already have results; don't flag too-early.
+    seo_too_early = (
+        seo_status != "ok"
+        and seo_days_elapsed is not None
+        and seo_days_elapsed < seo_days_needed_total
+    )
 
     if seo_too_early:
         # Overlay PRELIMINARY framing on the composed verdict — the verdict pill
@@ -1896,18 +1932,14 @@ def render_summary(run_dir: Path, out_path: Path, run_id: str, data_through: str
         # surface the day-counter; SEO line shows "TOO EARLY — X/14 days needed".
         eval_seo_since = exp.get("evaluate_seo_since")
         seo_status_str = seo.get("status")
-        seo_days_elapsed = None
-        seo_too_early = False
-        if eval_seo_since and data_through and seo_status_str != "ok":
-            try:
-                from datetime import date as _D
-                d_release = _D.fromisoformat(str(eval_seo_since))
-                d_through = _D.fromisoformat(str(data_through))
-                seo_days_elapsed = max(0, (d_through - d_release).days)
-                if seo_days_elapsed < 14:
-                    seo_too_early = True
-            except (ValueError, TypeError):
-                pass
+        # Wall-clock days since release (run-date anchored, same as build_payload).
+        # Computed unconditionally so the <28d maturity chip below works when SEO ran.
+        seo_days_elapsed = _seo_days_since_release(run_id, eval_seo_since, data_through)
+        seo_too_early = (
+            seo_status_str != "ok"
+            and seo_days_elapsed is not None
+            and seo_days_elapsed < 14
+        )
         final_rationale_text = composed["rationale"]
         if seo_too_early:
             final_rationale_text = (

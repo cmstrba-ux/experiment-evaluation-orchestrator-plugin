@@ -7,7 +7,32 @@ from render import (
     _seo_overall_ctr_did_pp,
     _seo_l2_row_lookup,
     _seo_l2_ctr_did_pp,
+    _seo_days_since_release,
 )
+
+
+def test_seo_days_anchored_on_run_date_not_data_through():
+    """Regression: the countdown must advance with the run date, not freeze at
+    (end_date - release). The 1/14-forever bug passed data_through = end_date =
+    release+1 while the run happened 10 days later — must read 10, not 1."""
+    # run_id = 2026-05-22-09-23, release 2026-05-12, data_through (AB end) 2026-05-13
+    assert _seo_days_since_release("2026-05-22-09-23", "2026-05-12", "2026-05-13") == 10
+    # Same release/window, later run date → strictly larger (not frozen).
+    assert _seo_days_since_release("2026-05-30-00-00", "2026-05-12", "2026-05-13") == 18
+
+
+def test_seo_days_falls_back_to_through_without_run_date():
+    """Idempotency fixture passes run_id='run' (no date prefix) → fall back to
+    data_through so behavior stays deterministic and non-crashing."""
+    assert _seo_days_since_release("run", "2026-05-12", "2026-05-19") == 7
+    assert _seo_days_since_release("run", "2026-05-12", "(unknown)") is None
+
+
+def test_seo_days_clamps_negative_and_handles_missing():
+    # Release after the run date → clamped to 0, never negative.
+    assert _seo_days_since_release("2026-05-12-00-00", "2026-05-20", "2026-05-20") == 0
+    assert _seo_days_since_release("2026-05-22-09-23", None, "2026-05-13") is None
+    assert _seo_days_since_release("2026-05-22-09-23", "not-a-date", "2026-05-13") is None
 
 
 def test_overall_ctr_did_pp_basic():
